@@ -39,7 +39,7 @@ function start {
     source "${CONFIG}" 2>/dev/null
 
     # Set defaults if not specified
-    : "${ALGO:=lz4}" "${SIZE:=256}" "${PRIORITY:=100}" "${PARAMS:=""}" "${ALGO1:=""}" "${ALGO2:=""}" "${ALGO3:=""}" "${PARAMS1:=""}" "${PARAMS2:=""}" "${PARAMS3:=""}"
+    : "${ALGO:=lz4}" "${SIZE:=256}" "${PRIORITY:=100}"
 
     SIZE=$((SIZE * 1024 * 1024)) # convert amount from MiB to bytes
 
@@ -50,19 +50,32 @@ function start {
     fi
 
     modprobe zram || elog "inserting the zram kernel module"
-    echo -n "${ALGO}" > /sys/block/zram0/comp_algorithm || elog "setting compression algo to ${ALGO}"
-    if [ -n "${PARAMS}" ]; then
-        echo -n "${PARAMS} priority=0" > /sys/block/zram0/algorithm_params || elog "setting compression param to ${PARAMS}"
+
+    IFS=',' read -ra ALGOS <<< "${ALGO}"
+    if [ ${#ALGOS[@]} -gt 4 ]; then
+        elog "Maximum of 4 algorithms allowed. Specified: ${#ALGOS[@]}"
     fi
-    if [ -n "${ALGO1}" ]; then
-        echo -n "algo=${ALGO1} ${PARAMS1} priority=1" > /sys/block/zram0/recomp_algorithm || elog "setting recompression algo to ${ALGO1}"
-    fi
-    if [ -n "${ALGO2}" ]; then
-        echo -n "algo=${ALGO2} ${PARAMS2} priority=2" > /sys/block/zram0/recomp_algorithm || elog "setting additional recompression algo to ${ALGO2}"
-    fi
-    if [ -n "${ALGO3}" ]; then
-        echo -n "algo=${ALGO3} ${PARAMS3} priority=3" > /sys/block/zram0/recomp_algorithm || elog "setting additional recompression algo to ${ALGO3}"
-    fi
+
+    for i in "${!ALGOS[@]}"; do
+        ALGO_PARAM=${ALGOS[$i]}
+        if [[ "$ALGO_PARAM" == *:* ]]; then
+            ALGO=$(echo "$ALGO_PARAM" | cut -d':' -f1)
+            PARAM="level=$(echo "$ALGO_PARAM" | cut -d':' -f2-)"
+        else
+            ALGO=$ALGO_PARAM
+            PARAM=""
+        fi
+
+        if [ $i -eq 0 ]; then
+            echo -n "${ALGO}" > /sys/block/zram0/comp_algorithm || elog "setting compression algo to ${ALGO}"
+            if [ -n "${PARAM}" ]; then
+                echo -n "${PARAM} priority=0" > /sys/block/zram0/algorithm_params || elog "setting compression param to ${PARAM}"
+            fi
+        else
+            echo -n "algo=${ALGO} ${PARAM} priority=$i" > /sys/block/zram0/recomp_algorithm || elog "setting recompression algo to ${ALGO}"
+        fi
+    done
+
     echo -n "${SIZE}" > /sys/block/zram0/disksize || elog "setting zram device size to ${SIZE}"
     mkswap "${SWAP_DEV}" || elog "initialising swap device"
     swapon -p "${PRIORITY}" "${SWAP_DEV}" || elog "enabling swap device"
