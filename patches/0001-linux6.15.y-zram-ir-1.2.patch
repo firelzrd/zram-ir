@@ -1,7 +1,7 @@
-From b0c992a74698c37af741b0e55eff012034ed098d Mon Sep 17 00:00:00 2001
+From b1c60b3790e1da27caae7e63480b5b232e8c0451 Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
 Date: Fri, 23 May 2025 12:35:48 +0900
-Subject: [PATCH] ZRAM-IR v1.2
+Subject: [PATCH] linux6.15.y-zram-ir-1.2
 
 ---
  drivers/block/zram/zram_drv.c | 90 ++++++++++++++++++++++++++++-------
