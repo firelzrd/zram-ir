@@ -39,7 +39,7 @@ function start {
     source "${CONFIG}" 2>/dev/null
 
     # Set defaults if not specified
-    : "${ALGO:=lz4,zstd}" "${SIZE:=256}" "${PRIORITY:=100}"
+    : "${ALGO:=zstd:2,zstd:4}" "${SIZE:=256}" "${PRIORITY:=100}"
 
     SIZE=$((SIZE * 1024 * 1024)) # convert amount from MiB to bytes
 
