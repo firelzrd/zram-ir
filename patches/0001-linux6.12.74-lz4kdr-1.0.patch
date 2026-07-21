@@ -1,0 +1,1654 @@
+From 72f42e59265b76c8d535e826a1027be220138abf Mon Sep 17 00:00:00 2001
+From: Masahito S <firelzrd@gmail.com>
+Date: Tue, 21 Jul 2026 09:33:30 +0900
+Subject: [PATCH] linux6.12.74-lz4kdr-1.0
+
+---
+ drivers/block/zram/Kconfig          |  17 +
+ drivers/block/zram/Makefile         |   1 +
+ drivers/block/zram/backend_lz4kdr.c | 108 ++++++
+ drivers/block/zram/backend_lz4kdr.h |  10 +
+ drivers/block/zram/zcomp.c          |   4 +
+ include/linux/lz4kdr.h              |  80 ++++
+ lib/Kconfig                         |   6 +
+ lib/Makefile                        |   2 +
+ lib/lz4kdr/Makefile                 |   3 +
+ lib/lz4kdr/lz4kdr_decode.c          | 249 +++++++++++++
+ lib/lz4kdr/lz4kdr_encode.c          | 559 ++++++++++++++++++++++++++++
+ lib/lz4kdr/lz4kdr_encode_private.h  | 135 +++++++
+ lib/lz4kdr/lz4kdr_private.h         | 317 ++++++++++++++++
+ 13 files changed, 1491 insertions(+)
+ create mode 100644 drivers/block/zram/backend_lz4kdr.c
+ create mode 100644 drivers/block/zram/backend_lz4kdr.h
+ create mode 100644 include/linux/lz4kdr.h
+ create mode 100644 lib/lz4kdr/Makefile
+ create mode 100644 lib/lz4kdr/lz4kdr_decode.c
+ create mode 100644 lib/lz4kdr/lz4kdr_encode.c
+ create mode 100644 lib/lz4kdr/lz4kdr_encode_private.h
+ create mode 100644 lib/lz4kdr/lz4kdr_private.h
+
+diff --git a/drivers/block/zram/Kconfig b/drivers/block/zram/Kconfig
+index 402b7b1758..debd96b4ed 100644
+--- a/drivers/block/zram/Kconfig
++++ b/drivers/block/zram/Kconfig
+@@ -26,6 +26,17 @@ config ZRAM_BACKEND_LZ4HC
+ 	select LZ4HC_COMPRESS
+ 	select LZ4_DECOMPRESS
+ 
++config ZRAM_BACKEND_LZ4KDR
++	bool "lz4kdr compression support"
++	depends on ZRAM
++	select LZ4KDR_COMPRESS
++	select LZ4KDR_DECOMPRESS
++	help
++	  LZ4KDR is a speed-tuned derivative of Huawei's LZ4KD (a
++	  zram-oriented LZ4 variant), wire-compatible with the original
++	  LZ4KD encoding but with a reworked encoder search loop. See
++	  include/linux/lz4kdr.h for the attribution and what changed.
++
+ config ZRAM_BACKEND_ZSTD
+ 	bool "zstd compression support"
+ 	depends on ZRAM
+@@ -47,6 +58,7 @@ config ZRAM_BACKEND_842
+ config ZRAM_BACKEND_FORCE_LZO
+ 	depends on ZRAM
+ 	def_bool !ZRAM_BACKEND_LZ4 && !ZRAM_BACKEND_LZ4HC && \
++		!ZRAM_BACKEND_LZ4KDR && \
+ 		!ZRAM_BACKEND_ZSTD && !ZRAM_BACKEND_DEFLATE && \
+ 		!ZRAM_BACKEND_842
+ 
+@@ -78,6 +90,10 @@ config ZRAM_DEF_COMP_LZ4HC
+ 	bool "lz4hc"
+ 	depends on ZRAM_BACKEND_LZ4HC
+ 
++config ZRAM_DEF_COMP_LZ4KDR
++	bool "lz4kdr"
++	depends on ZRAM_BACKEND_LZ4KDR
++
+ config ZRAM_DEF_COMP_ZSTD
+ 	bool "zstd"
+ 	depends on ZRAM_BACKEND_ZSTD
+@@ -99,6 +115,7 @@ config ZRAM_DEF_COMP
+ 	default "lzo" if ZRAM_DEF_COMP_LZO
+ 	default "lz4" if ZRAM_DEF_COMP_LZ4
+ 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
++	default "lz4kdr" if ZRAM_DEF_COMP_LZ4KDR
+ 	default "zstd" if ZRAM_DEF_COMP_ZSTD
+ 	default "deflate" if ZRAM_DEF_COMP_DEFLATE
+ 	default "842" if ZRAM_DEF_COMP_842
+diff --git a/drivers/block/zram/Makefile b/drivers/block/zram/Makefile
+index 0fdefd5766..c239bb246a 100644
+--- a/drivers/block/zram/Makefile
++++ b/drivers/block/zram/Makefile
+@@ -5,6 +5,7 @@ zram-y	:=	zcomp.o zram_drv.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZO)		+= backend_lzorle.o backend_lzo.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4)		+= backend_lz4.o
+ zram-$(CONFIG_ZRAM_BACKEND_LZ4HC)	+= backend_lz4hc.o
++zram-$(CONFIG_ZRAM_BACKEND_LZ4KDR)	+= backend_lz4kdr.o
+ zram-$(CONFIG_ZRAM_BACKEND_ZSTD)	+= backend_zstd.o
+ zram-$(CONFIG_ZRAM_BACKEND_DEFLATE)	+= backend_deflate.o
+ zram-$(CONFIG_ZRAM_BACKEND_842)		+= backend_842.o
+diff --git a/drivers/block/zram/backend_lz4kdr.c b/drivers/block/zram/backend_lz4kdr.c
+new file mode 100644
+index 0000000000..6863f8803a
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4kdr.c
+@@ -0,0 +1,108 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * zram backend for LZ4KDR (see include/linux/lz4kdr.h for what it is
++ * and how it relates to Huawei's original LZ4KD).
++ *
++ * No dict/level support -- LZ4KDR doesn't have either concept, so
++ * setup_params/release_params are no-ops, same as backend_842.c.
++ *
++ * The context's `ht` buffer is the hash table lz4kdr_encode() searches
++ * with. It's kzalloc()'d once here (not vmalloc()'d -- at
++ * lz4kdr_encode_state_bytes_min()==2048 bytes it's well within
++ * kmalloc's normal range, and per-CPU vmalloc mappings only cost more
++ * TLB pressure for no benefit at this size) and, critically, the
++ * kzalloc zeroing IS the one-time cold-start zero lz4kdr_encode()'s
++ * API contract requires -- lz4kdr does NOT re-zero this buffer on
++ * every compress call the way upstream LZ4KD does, see
++ * lz4kdr_encode.c's probe-loop comment for why that's still correct.
++ */
++
++#include <linux/kernel.h>
++#include <linux/lz4kdr.h>
++#include <linux/slab.h>
++
++#include "backend_lz4kdr.h"
++
++struct lz4kdr_ctx {
++	void *ht;
++};
++
++static void lz4kdr_release_params(struct zcomp_params *params)
++{
++}
++
++static int lz4kdr_setup_params(struct zcomp_params *params)
++{
++	return 0;
++}
++
++static void lz4kdr_destroy(struct zcomp_ctx *ctx)
++{
++	struct lz4kdr_ctx *zctx = ctx->context;
++
++	if (!zctx)
++		return;
++
++	kfree(zctx->ht);
++	kfree(zctx);
++}
++
++static int lz4kdr_create(struct zcomp_params *params, struct zcomp_ctx *ctx)
++{
++	struct lz4kdr_ctx *zctx;
++
++	zctx = kzalloc(sizeof(*zctx), GFP_KERNEL);
++	if (!zctx)
++		return -ENOMEM;
++
++	ctx->context = zctx;
++	/* kzalloc, not kmalloc: the zeroing here IS the required one-time
++	 * cold-start zero, see the top-of-file comment. */
++	zctx->ht = kzalloc(lz4kdr_encode_state_bytes_min(), GFP_KERNEL);
++	if (!zctx->ht)
++		goto error;
++
++	return 0;
++
++error:
++	lz4kdr_destroy(ctx);
++	return -ENOMEM;
++}
++
++static int lz4kdr_compress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			   struct zcomp_req *req)
++{
++	struct lz4kdr_ctx *zctx = ctx->context;
++	int ret;
++
++	ret = lz4kdr_encode(zctx->ht, req->src, req->dst,
++			    (unsigned int)req->src_len,
++			    (unsigned int)req->dst_len, 0);
++	if (ret <= 0)
++		return -EINVAL;
++	req->dst_len = ret;
++	return 0;
++}
++
++static int lz4kdr_decompress(struct zcomp_params *params, struct zcomp_ctx *ctx,
++			     struct zcomp_req *req)
++{
++	int ret;
++
++	ret = lz4kdr_decode(req->src, req->dst,
++			    (unsigned int)req->src_len,
++			    (unsigned int)req->dst_len);
++	if (ret <= 0)
++		return -EINVAL;
++	return 0;
++}
++
++const struct zcomp_ops backend_lz4kdr = {
++	.compress	= lz4kdr_compress,
++	.decompress	= lz4kdr_decompress,
++	.create_ctx	= lz4kdr_create,
++	.destroy_ctx	= lz4kdr_destroy,
++	.setup_params	= lz4kdr_setup_params,
++	.release_params	= lz4kdr_release_params,
++	.name		= "lz4kdr",
++};
+diff --git a/drivers/block/zram/backend_lz4kdr.h b/drivers/block/zram/backend_lz4kdr.h
+new file mode 100644
+index 0000000000..a01ef716c9
+--- /dev/null
++++ b/drivers/block/zram/backend_lz4kdr.h
+@@ -0,0 +1,10 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#ifndef __BACKEND_LZ4KDR_H__
++#define __BACKEND_LZ4KDR_H__
++
++#include "zcomp.h"
++
++extern const struct zcomp_ops backend_lz4kdr;
++
++#endif /* __BACKEND_LZ4KDR_H__ */
+diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
+index bb514403e3..e5e6ec52a9 100644
+--- a/drivers/block/zram/zcomp.c
++++ b/drivers/block/zram/zcomp.c
+@@ -16,6 +16,7 @@
+ #include "backend_lzorle.h"
+ #include "backend_lz4.h"
+ #include "backend_lz4hc.h"
++#include "backend_lz4kdr.h"
+ #include "backend_zstd.h"
+ #include "backend_deflate.h"
+ #include "backend_842.h"
+@@ -31,6 +32,9 @@ static const struct zcomp_ops *backends[] = {
+ #if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4HC)
+ 	&backend_lz4hc,
+ #endif
++#if IS_ENABLED(CONFIG_ZRAM_BACKEND_LZ4KDR)
++	&backend_lz4kdr,
++#endif
+ #if IS_ENABLED(CONFIG_ZRAM_BACKEND_ZSTD)
+ 	&backend_zstd,
+ #endif
+diff --git a/include/linux/lz4kdr.h b/include/linux/lz4kdr.h
+new file mode 100644
+index 0000000000..d2ddf5c07a
+--- /dev/null
++++ b/include/linux/lz4kdr.h
+@@ -0,0 +1,80 @@
++/* SPDX-License-Identifier: Dual BSD/GPL */
++/*
++ * LZ4KDR: a speed-tuned derivative of Huawei's LZ4KD.
++ *
++ * Original LZ4KD:
++ *   Copyright (c) Huawei Technologies Co., Ltd. 2022. All rights reserved.
++ *   "LZ4K compression algorithm with delta compression"
++ *
++ * This derivative keeps LZ4KD's on-wire format (the compressed bitstream
++ * is byte-for-byte compatible with the original decoder) but changes the
++ * encoder's internal search behavior for speed, per a small set of
++ * independently-benchmarked optimizations (see the "lz4kdr" userspace
++ * benchmark suite this was validated against, and
++ * lz4kd_extreme_optimization_ideas.md for the full idea list this was
++ * drawn from). It is renamed from lz4kd to lz4kdr specifically so it is
++ * not mistaken for an unmodified import of Huawei's original code -- all
++ * credit for the underlying algorithm and format belongs to them.
++ */
++
++#ifndef _LZ4KDR_H
++#define _LZ4KDR_H
++
++typedef enum {
++	LZ4KDR_STATUS_INCOMPRESSIBLE =  0, /* data did not compress */
++	LZ4KDR_STATUS_FAILED         = -1, /* general failure */
++	LZ4KDR_STATUS_READ_ERROR     = -2, /* corrupt/truncated input */
++	LZ4KDR_STATUS_WRITE_ERROR    = -3
++} lz4kdr_status;
++
++const char *lz4kdr_version(void);
++
++/*
++ * lz4kdr_encode_state_bytes_min() returns the number of bytes the
++ * `state` scratch buffer passed to lz4kdr_encode() must be at least.
++ */
++unsigned lz4kdr_encode_state_bytes_min(void);
++
++/*
++ * lz4kdr_encode() compresses one 4KB-or-smaller input block.
++ *
++ * Return value:
++ *   > 0  success; the size of the encoded data, always <= out_max.
++ *   0    data did not compress (encoded size would meet or exceed
++ *        out_limit, or wouldn't fit out_max at all).
++ *   < 0  failure (bad arguments, or in_max > 4096).
++ *
++ * `state` must be >= lz4kdr_encode_state_bytes_min() bytes and must be
++ * zeroed once by the caller before its first use (e.g. right after
++ * allocation) -- lz4kdr does NOT re-zero it on every call, unlike
++ * upstream LZ4KD. See lz4kdr_encode.c's probe-loop comment for why
++ * that's still always correct: it never reads a byte it hasn't proven
++ * is in-bounds and behind the current search position.
++ *
++ * `out_limit`, if nonzero and less than min(in_max, out_max), lets the
++ * encoder bail out early once it's clear the result won't beat that
++ * size (e.g. pass the backing store's "not worth compressing further
++ * than this" threshold). 0 means "use min(in_max, out_max)".
++ */
++int lz4kdr_encode(
++	void *const state,
++	const void *const in,
++	void *out,
++	unsigned in_max,
++	unsigned out_max,
++	unsigned out_limit);
++
++/*
++ * lz4kdr_decode() reverses lz4kdr_encode() (and unmodified upstream
++ * LZ4KD's encoder -- the format didn't change).
++ *
++ * Returns the decoded size (== in_max passed to the matching encode
++ * call) on success, or a negative lz4kdr_status on failure.
++ */
++int lz4kdr_decode(
++	const void *const in,
++	void *const out,
++	unsigned in_max,
++	unsigned out_max);
++
++#endif /* _LZ4KDR_H */
+diff --git a/lib/Kconfig b/lib/Kconfig
+index b893c9288c..bc1157380f 100644
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -336,6 +336,12 @@ config LZ4_COMPRESS
+ config LZ4HC_COMPRESS
+ 	tristate
+ 
++config LZ4KDR_COMPRESS
++	tristate
++
++config LZ4KDR_DECOMPRESS
++	tristate
++
+ config LZ4_DECOMPRESS
+ 	tristate
+ 
+diff --git a/lib/Makefile b/lib/Makefile
+index fc878e7168..562f768f0c 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -181,6 +181,8 @@ obj-$(CONFIG_LZO_DECOMPRESS) += lzo/
+ obj-$(CONFIG_LZ4_COMPRESS) += lz4/
+ obj-$(CONFIG_LZ4HC_COMPRESS) += lz4/
+ obj-$(CONFIG_LZ4_DECOMPRESS) += lz4/
++obj-$(CONFIG_LZ4KDR_COMPRESS) += lz4kdr/
++obj-$(CONFIG_LZ4KDR_DECOMPRESS) += lz4kdr/
+ obj-$(CONFIG_ZSTD_COMPRESS) += zstd/
+ obj-$(CONFIG_ZSTD_DECOMPRESS) += zstd/
+ obj-$(CONFIG_XZ_DEC) += xz/
+diff --git a/lib/lz4kdr/Makefile b/lib/lz4kdr/Makefile
+new file mode 100644
+index 0000000000..089e6fb8a1
+--- /dev/null
++++ b/lib/lz4kdr/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_LZ4KDR_COMPRESS) += lz4kdr_encode.o
++obj-$(CONFIG_LZ4KDR_DECOMPRESS) += lz4kdr_decode.o
+diff --git a/lib/lz4kdr/lz4kdr_decode.c b/lib/lz4kdr/lz4kdr_decode.c
+new file mode 100644
+index 0000000000..d2ccae1ceb
+--- /dev/null
++++ b/lib/lz4kdr/lz4kdr_decode.c
+@@ -0,0 +1,249 @@
++// SPDX-License-Identifier: Dual BSD/GPL
++/*
++ * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD.
++ * See include/linux/lz4kdr.h for the attribution note.
++ *
++ * Decoder: byte-for-byte unchanged from upstream LZ4KD's algorithm --
++ * none of the four validated speedups this fork carries touch decode,
++ * only the encoder's internal search behavior changed. Renamed
++ * lz4kd_* -> lz4kdr_* for the exported symbols only.
++ */
++
++#if !defined(__KERNEL__)
++#include "lz4kdr.h"
++#else
++#include <linux/lz4kdr.h>
++#include <linux/module.h>
++#endif
++
++#include "lz4kdr_private.h" /* types, etc */
++
++static const uint8_t *get_size(
++	uint_fast32_t *size,
++	const uint8_t *in_at,
++	const uint8_t *const in_end)
++{
++	uint_fast32_t u;
++	do {
++		if (unlikely(in_at >= in_end))
++			return NULL;
++		*size += (u = *(const uint8_t*)in_at);
++		++in_at;
++	} while (BYTE_MAX == u);
++	return in_at;
++}
++
++static int end_of_block(
++	const uint_fast32_t nr_bytes_max,
++	const uint_fast32_t r_bytes_max,
++	const uint8_t *const in_at,
++	const uint8_t *const in_end,
++	const uint8_t *const out,
++	const uint8_t *const out_at)
++{
++	if (!nr_bytes_max)
++		return LZ4KDR_STATUS_FAILED; /* should be the last one in block */
++	if (r_bytes_max != REPEAT_MIN)
++		return LZ4KDR_STATUS_FAILED; /* should be the last one in block */
++	if (in_at != in_end)
++		return LZ4KDR_STATUS_FAILED; /* should be the last one in block */
++	return (int)(out_at - out);
++}
++
++enum {
++	NR_COPY_MIN = 16,
++	R_COPY_MIN = 16,
++	R_COPY_SAFE = R_COPY_MIN - 1,
++	R_COPY_SAFE_2X = (R_COPY_MIN << 1) - 1
++};
++
++static bool out_non_repeat(
++	const uint8_t **in_at,
++	uint8_t **out_at,
++	uint_fast32_t nr_bytes_max,
++	const uint8_t *const in_end,
++	const uint8_t *const out_end)
++{
++	const uint8_t *const in_copy_end = *in_at + nr_bytes_max;
++	uint8_t *const out_copy_end = *out_at + nr_bytes_max;
++	if (likely(nr_bytes_max <= NR_COPY_MIN)) {
++		if (likely(*in_at <= in_end - NR_COPY_MIN &&
++			   *out_at <= out_end - NR_COPY_MIN))
++			m_copy(*out_at, *in_at, NR_COPY_MIN);
++		else if (in_copy_end <= in_end && out_copy_end <= out_end)
++			m_copy(*out_at, *in_at, nr_bytes_max);
++		else
++			return false;
++	} else { /* nr_bytes_max>NR_COPY_MIN */
++		if (likely(in_copy_end <= in_end - NR_COPY_MIN &&
++			   out_copy_end <= out_end - NR_COPY_MIN)) {
++			m_copy(*out_at, *in_at, NR_COPY_MIN);
++			copy_x_while_lt(*out_at + NR_COPY_MIN,
++					*in_at + NR_COPY_MIN,
++					out_copy_end, NR_COPY_MIN);
++		} else if (in_copy_end <= in_end && out_copy_end <= out_end) {
++			m_copy(*out_at, *in_at, nr_bytes_max);
++		} else { /* in_copy_end > in_end || out_copy_end > out_end */
++			return false;
++		}
++	} /* if (nr_bytes_max <= NR_COPY_MIN) */
++	*in_at = in_copy_end;
++	*out_at = out_copy_end;
++	return true;
++}
++
++static void out_repeat_overlap(
++	uint_fast32_t offset,
++	uint8_t *out_at,
++	const uint8_t *out_from,
++	const uint8_t *const out_copy_end)
++{
++	enum {
++		COPY_MIN = R_COPY_MIN >> 1,
++		OFFSET_LIMIT = COPY_MIN >> 1
++	};
++	m_copy(out_at, out_from, COPY_MIN);
++/* (1 < offset < R_COPY_MIN/2) && out_copy_end + R_COPY_SAFE_2X  <= out_end */
++	out_at += offset;
++	if (offset <= OFFSET_LIMIT)
++		offset <<= 1;
++	do {
++		m_copy(out_at, out_from, COPY_MIN);
++		out_at += offset;
++		if (offset <= OFFSET_LIMIT)
++			offset <<= 1;
++	} while (out_at - out_from < R_COPY_MIN);
++	while_lt_copy_2x_as_x2(out_at, out_from, out_copy_end, R_COPY_MIN);
++}
++
++static bool out_repeat_slow(
++	uint_fast32_t r_bytes_max,
++	uint_fast32_t offset,
++	uint8_t *out_at,
++	const uint8_t *out_from,
++	const uint8_t *const out_copy_end,
++	const uint8_t *const out_end)
++{
++	if (offset > 1 && out_copy_end <= out_end - R_COPY_SAFE_2X) {
++		out_repeat_overlap(offset, out_at, out_from, out_copy_end);
++	} else {
++		if (unlikely(out_copy_end > out_end))
++			return false;
++		if (offset == 1) {
++			m_set(out_at, *out_from, r_bytes_max);
++		} else {
++			do
++				*out_at++ = *out_from++;
++			while (out_at < out_copy_end);
++		}
++	}
++	return true;
++}
++
++static int decode(
++	const uint8_t *in_at,
++	uint8_t *const out,
++	const uint8_t *const in_end,
++	const uint8_t *const out_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
++	const uint8_t *const in_end_minus_x = in_end - TAG_BYTES_MAX;
++	uint8_t *out_at = out;
++	while (likely(in_at <= in_end_minus_x)) {
++		const uint_fast32_t utag = read4_at(in_at - 1) >> BYTE_BITS;
++		const uint_fast32_t offset = utag & mask(off_log2);
++		uint_fast32_t nr_bytes_max = utag >> (off_log2 + r_log2),
++			      r_bytes_max = ((utag >> off_log2) & mask(r_log2)) +
++					    REPEAT_MIN;
++		const uint8_t *out_from = 0;
++		uint8_t *out_copy_end = 0;
++		const uint8_t *out_safe_end = 0;
++		in_at += TAG_BYTES_MAX;
++		if (unlikely(nr_bytes_max == mask(nr_log2))) {
++			in_at = get_size(&nr_bytes_max, in_at, in_end);
++			if (unlikely(in_at == NULL))
++				return LZ4KDR_STATUS_READ_ERROR;
++		}
++		if (!out_non_repeat(&in_at, &out_at, nr_bytes_max, in_end, out_end))
++			return LZ4KDR_STATUS_FAILED;
++		if (unlikely(r_bytes_max == mask(r_log2) + REPEAT_MIN)) {
++			in_at = get_size(&r_bytes_max, in_at, in_end);
++			if (unlikely(in_at == NULL))
++				return LZ4KDR_STATUS_READ_ERROR;
++		}
++		out_from = out_at - offset;
++		if (unlikely(out_from < out))
++			return LZ4KDR_STATUS_FAILED;
++		out_copy_end = out_at + r_bytes_max;
++		out_safe_end = out_end - R_COPY_SAFE_2X;
++		if (likely(offset >= R_COPY_MIN && out_copy_end <= out_safe_end)) {
++			copy_2x_as_x2_while_lt(out_at, out_from, out_copy_end,
++					       R_COPY_MIN);
++		} else if (likely(offset >= (R_COPY_MIN >> 1) &&
++				  out_copy_end <= out_safe_end)) {
++			m_copy(out_at, out_from, R_COPY_MIN);
++			out_at += offset;
++			while_lt_copy_x(out_at, out_from, out_copy_end, R_COPY_MIN);
++		} else if (likely(offset > 0)) {
++			if (!out_repeat_slow(r_bytes_max, offset, out_at, out_from,
++			     out_copy_end, out_end))
++				return LZ4KDR_STATUS_FAILED;
++		} else { /* offset == 0: EOB, last literal */
++			return end_of_block(nr_bytes_max, r_bytes_max, in_at,
++					    in_end, out, out_at);
++		}
++		out_at = out_copy_end;
++	} /* while (likely(in_at <= in_end_minus_x)) */
++	return in_at == in_end ? (int)(out_at - out) : LZ4KDR_STATUS_FAILED;
++}
++
++static int decode_pattern_4kb(
++	const uint8_t *const in,
++	uint8_t *const out,
++	const uint8_t *const out_end)
++{
++	const uint64_t pattern = *(const uint64_t*)in;
++	uint64_t *o64 = (uint64_t*)out;
++	const uint64_t *const o64_end = (const uint64_t*)out_end - 1;
++	for (; o64 <= o64_end; ++o64)
++	  *o64 = pattern;
++	return (uint8_t*)o64 == out_end ? (int)(out_end - out) : LZ4KDR_STATUS_FAILED;
++}
++
++static int decode_4kb(
++	const uint8_t *const in,
++	uint8_t *const out,
++	const uint8_t *const in_end,
++	const uint8_t *const out_end)
++{
++	return decode(in, out, in_end, out_end, NR_4KB_LOG2, BLOCK_4KB_LOG2);
++}
++
++int lz4kdr_decode(
++	const void *in,
++	void *const out,
++	unsigned in_max,
++	unsigned out_max)
++{
++	/* ++use volatile pointers to prevent compiler optimizations */
++	const uint8_t *volatile in_end = (const uint8_t*)in + in_max;
++	const uint8_t *volatile out_end = (uint8_t*)out + min_u64(out_max, 1 << BLOCK_4KB_LOG2);
++	if (unlikely(in == NULL || out == NULL))
++		return LZ4KDR_STATUS_FAILED;
++	if (unlikely(in_max <= 1 + TAG_BYTES_MAX || out_max <= 0))
++		return LZ4KDR_STATUS_FAILED;
++	/* invalid buffer size or pointer overflow */
++	if (unlikely((const uint8_t*)in >= in_end || (uint8_t*)out >= out_end))
++		return LZ4KDR_STATUS_FAILED;
++	/* -- */
++	if (unlikely(in_max == PATTERN_BYTES_MAX))
++		return decode_pattern_4kb((const uint8_t*)in, (uint8_t*)out,
++				out_end);
++	return decode_4kb((const uint8_t*)in + 1, (uint8_t*)out, in_end, out_end);
++}
++EXPORT_SYMBOL(lz4kdr_decode);
++
++MODULE_LICENSE("Dual BSD/GPL");
++MODULE_DESCRIPTION("LZ4KDR decoder (speed-tuned LZ4KD derivative)");
+diff --git a/lib/lz4kdr/lz4kdr_encode.c b/lib/lz4kdr/lz4kdr_encode.c
+new file mode 100644
+index 0000000000..0b9e7db274
+--- /dev/null
++++ b/lib/lz4kdr/lz4kdr_encode.c
+@@ -0,0 +1,559 @@
++// SPDX-License-Identifier: Dual BSD/GPL
++/*
++ * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD. See include/linux/
++ * lz4kdr.h for the attribution note and lz4kdr_decode.c's header for
++ * why decode is untouched.
++ *
++ * This encoder carries three changes vs. upstream LZ4KD, each
++ * independently measured positive across four synthetic benchmark
++ * corpora (zero/high/medium/low compressibility) AND three real-world
++ * corpora (a compiled executable, an already-compressed video, real
++ * prose/markup text) before being combined here -- see the "lz4kdr"
++ * userspace benchmark suite this was validated against and
++ * lz4kd_extreme_optimization_ideas.md for the full writeup. Every
++ * change is called out inline where it occurs:
++ *
++ *   1. No per-call memset() of the hash table; a branchless q<r guard
++ *      in the probe loop takes over the safety argument instead.
++ *   2. HT_LOG2 12->10: 8KB->2KB hash table (a real CR/speed trade,
++ *      the only one of these changes with a downside -- see the
++ *      comment on HT_LOG2 below).
++ *   3. Adaptive search-step acceleration, now backed by a genuine
++ *      per-CPU variable (this needed a real kernel home; the
++ *      benchmark's file-scope static was an acknowledged stand-in).
++ *
++ * A fourth change -- an AVX2 32B vectorized match-length scan in
++ * repeat_end() -- was implemented, benchmarked, and REMOVED. It was a
++ * huge win on the synthetic zero/high corpora (+40-54%) but a real
++ * 7-24% REGRESSION on real compiled-executable data: matches in real
++ * machine code rarely run past a handful of bytes, so the vector
++ * path's fixed load+compare+movemask cost gets paid on nearly every
++ * match found and essentially never amortized -- wider vectors made
++ * this *worse* (AVX-512 regressed executables more than AVX2, which
++ * regressed them more than SSE2). Two rounds of heuristic gating (an
++ * 8-byte peek before committing to the vector loop, then a page-level
++ * adaptive on/off streak mirroring change 3's mechanism) only
++ * partially closed the gap, down to a residual ~8% regression at
++ * best, and the page-level version underperformed the simpler
++ * per-match peek. Rather than ship a partial fix for a real
++ * regression on an extremely common real-world zram content type
++ * (compiled code -- shared libraries, executables), it was dropped
++ * entirely. If revisiting this, the interesting open question is
++ * whether a per-block cheap classifier decided *before* compression
++ * starts (rather than gating each individual match) could tell long-
++ * match-heavy pages (worth vectorizing) apart from short-match-heavy
++ * ones (not) accurately enough to be worth the complexity.
++ */
++
++#if !defined(__KERNEL__)
++#include "lz4kdr.h"
++#else
++#include <linux/lz4kdr.h>
++#include <linux/module.h>
++#include <linux/percpu.h>
++#endif
++
++#include "lz4kdr_private.h"
++#include "lz4kdr_encode_private.h"
++
++enum {
++	/*
++	 * change 2: "turbo" hash table. Upstream LZ4KD used 12 (4096
++	 * entries, 8KB). 10 -> 1024 entries, 2KB, comfortably L1d-resident
++	 * on essentially any core -- at the cost of more hash collisions,
++	 * i.e. a real (measured ~2.5% on realistic code/text data)
++	 * compression-ratio regression. This is the only one of the four
++	 * changes with a downside; if that trade isn't acceptable for a
++	 * given deployment, this is the one line to revert back to 12.
++	 */
++	HT_LOG2 = 10,
++	STEP_LOG2 = 5 /* ==3 #2 avg drop in CR */
++};
++
++/*
++ * change 3: adaptive search-step acceleration state.
++ *
++ * zcomp_stream_get() disables preemption for the duration of a
++ * compress call (it's a get_cpu_ptr() under the hood), so a plain
++ * per-CPU variable is exactly the right home for this -- no locking,
++ * no risk of one CPU's streak biasing another's, and it survives
++ * across calls on the same CPU exactly like the per-CPU hash table
++ * context does.
++ */
++enum { ACCEL_BIAS_MAX = 3 };
++
++#if defined(__KERNEL__)
++static DEFINE_PER_CPU(unsigned int, lz4kdr_accel_bias);
++#define ACCEL_BIAS_GET()   this_cpu_read(lz4kdr_accel_bias)
++#define ACCEL_BIAS_INC()   this_cpu_inc(lz4kdr_accel_bias)
++#define ACCEL_BIAS_RESET() this_cpu_write(lz4kdr_accel_bias, 0)
++#else
++static unsigned int g_accel_bias;
++#define ACCEL_BIAS_GET()   (g_accel_bias)
++#define ACCEL_BIAS_INC()   (g_accel_bias++)
++#define ACCEL_BIAS_RESET() (g_accel_bias = 0)
++#endif
++
++static unsigned encode_state_bytes_min(void)
++{
++	enum {
++		BYTES_LOG2 = HT_LOG2 + 1
++	};
++	const unsigned bytes_total = (1U << BYTES_LOG2);
++	return bytes_total;
++}
++
++#if !defined(LZ4K_DELTA) && !defined(LZ4K_MAX_CR)
++
++unsigned lz4kdr_encode_state_bytes_min(void)
++{
++	return encode_state_bytes_min();
++}
++EXPORT_SYMBOL(lz4kdr_encode_state_bytes_min);
++
++#endif /* !defined(LZ4K_DELTA) && !defined(LZ4K_MAX_CR) */
++
++/* minimum encoded size for non-compressible data */
++inline static uint_fast32_t encoded_bytes_min(
++	uint_fast32_t nr_log2,
++	uint_fast32_t in_max)
++{
++	return in_max < mask(nr_log2) ?
++		TAG_BYTES_MAX + in_max :
++		TAG_BYTES_MAX + size_bytes_count(in_max - mask(nr_log2)) + in_max;
++}
++
++inline static void  update_utag(
++	uint_fast32_t r_bytes_max,
++	uint_fast32_t *utag,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
++	*utag |= likely(r_bytes_max - REPEAT_MIN < r_mask) ?
++		 ((r_bytes_max - REPEAT_MIN) << off_log2) : (r_mask << off_log2);
++}
++
++inline static uint8_t *out_size_bytes(uint8_t *out_at, uint_fast32_t u)
++{
++	for (; u >= BYTE_MAX; *out_at++ = (uint8_t)BYTE_MAX, u -= BYTE_MAX);
++	*out_at++ = (uint8_t)u;
++	return out_at;
++}
++
++inline static uint8_t *out_utag_then_bytes_left(
++	uint8_t *out_at,
++	uint_fast32_t utag,
++	uint_fast32_t bytes_left)
++{
++	m_copy(out_at, &utag, TAG_BYTES_MAX);
++	return out_size_bytes(out_at + TAG_BYTES_MAX, bytes_left);
++}
++
++static int out_tail(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const nr0,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t nr_mask = mask(nr_log2);
++	const uint_fast32_t r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
++	const uint_fast32_t nr_bytes_now = u_32(in_end - nr0);
++	if (encoded_bytes_min(nr_log2, nr_bytes_now) > u_32(out_end - out_at))
++		return LZ4KDR_STATUS_INCOMPRESSIBLE;
++	if (nr_bytes_now < nr_mask) {
++		/* caller guarantees at least one nr-byte */
++		uint_fast32_t utag = (nr_bytes_now << (off_log2 + r_log2));
++		m_copy(out_at, &utag, TAG_BYTES_MAX);
++		out_at += TAG_BYTES_MAX;
++	} else { /* nr_bytes_now>=nr_mask */
++		uint_fast32_t bytes_left = nr_bytes_now - nr_mask;
++		uint_fast32_t utag = (nr_mask << (off_log2 + r_log2));
++		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
++	} /* if (nr_bytes_now<nr_mask) */
++	m_copy(out_at, nr0, nr_bytes_now);
++	return (int)(out_at + nr_bytes_now - out);
++}
++
++inline static int out_tail2(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const r,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	return r == in_end ? (int)(out_at - out) :
++		out_tail(out_at, out_end, out, r, in_end,
++			 nr_log2, off_log2);
++}
++
++int lz4kdr_out_tail(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const nr0,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool check_out)
++{
++	return out_tail(out_at, out_end, out, nr0, in_end,
++			nr_log2, off_log2);
++}
++
++static uint8_t *out_non_repeat(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t nr_bytes_max = u_32(r - nr0);
++	const uint_fast32_t nr_mask = mask(nr_log2),
++		r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
++	if (likely(nr_bytes_max < nr_mask)) {
++		utag |= (nr_bytes_max << (off_log2 + r_log2));
++		m_copy(out_at, &utag, TAG_BYTES_MAX);
++		out_at += TAG_BYTES_MAX;
++	} else { /* nr_bytes_max >= nr_mask */
++		uint_fast32_t bytes_left = nr_bytes_max - nr_mask;
++		utag |= (nr_mask << (off_log2 + r_log2));
++		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
++	} /* if (nr_bytes_max<nr_mask) */
++	copy_x_while_total(out_at, nr0, nr_bytes_max, NR_COPY_MIN);
++	out_at += nr_bytes_max;
++	return out_at;
++}
++
++inline static uint8_t *out_r_bytes_left(
++	uint8_t *out_at,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
++	return likely(r_bytes_max - REPEAT_MIN < r_mask) ?
++		out_at : out_size_bytes(out_at, r_bytes_max - REPEAT_MIN - r_mask);
++}
++
++static uint8_t *out_repeat(
++	uint8_t *out_at,
++	uint_fast32_t utag,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
++	if (likely(r_bytes_max - REPEAT_MIN < r_mask)) {
++		utag |= ((r_bytes_max - REPEAT_MIN) << off_log2);
++		m_copy(out_at, &utag, TAG_BYTES_MAX);
++		out_at += TAG_BYTES_MAX;
++	} else {
++		uint_fast32_t bytes_left = r_bytes_max - REPEAT_MIN - r_mask;
++		utag |= (r_mask << off_log2);
++		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
++	}
++	return out_at; /* SUCCESS: continue compression */
++}
++
++uint8_t *lz4kdr_out_repeat(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	const bool check_out)
++{
++	return out_repeat(out_at, utag, r_bytes_max, nr_log2, off_log2);
++}
++
++inline static uint8_t *out_tuple(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2)
++{
++	update_utag(r_bytes_max, &utag, nr_log2, off_log2);
++	out_at = out_non_repeat(out_at, out_end, utag, nr0, r, nr_log2, off_log2);
++	return out_r_bytes_left(out_at, r_bytes_max, nr_log2, off_log2);
++}
++
++uint8_t *lz4kdr_out_tuple(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool check_out)
++{
++	return out_tuple(out_at, out_end, utag, nr0, r, r_bytes_max,
++				nr_log2, off_log2);
++}
++
++static const uint8_t *repeat_end(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const in_end_safe,
++	const uint8_t *const in_end)
++{
++	q += REPEAT_MIN;
++	r += REPEAT_MIN;
++	/* An AVX2 32B-at-a-time vector compare lived here; removed after
++	 * real-world benchmarking found it regressed compiled-executable
++	 * data 7-24% (see the top-of-file comment) -- back to upstream
++	 * LZ4KD's original scalar 8B loop, unmodified. */
++	do {
++		const uint64_t x = read8_at(q) ^ read8_at(r);
++		if (x) {
++			const uint16_t ctz = (uint16_t)__builtin_ctzl(x);
++			return r + (ctz >> BYTE_BITS_LOG2);
++		}
++		/* some bytes differ: count of trailing 0-bits/bytes */
++		q += sizeof(uint64_t);
++		r += sizeof(uint64_t);
++	} while (likely(r <= in_end_safe)); /* once, at input block end */
++	while (r < in_end) {
++		if (*q != *r) return r;
++		++q;
++		++r;
++	}
++	return r;
++}
++
++const uint8_t *lz4kdr_repeat_end(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const in_end_safe,
++	const uint8_t *const in_end)
++{
++	return repeat_end(q, r, in_end_safe, in_end);
++}
++
++/* CR increase order: +STEP, have OFFSETS, use _5b(most impact) */
++/* *_6b to compete with LZ4 */
++inline static uint_fast32_t hash(const uint8_t *r)
++{
++	return hash64_5b(r, HT_LOG2);
++}
++
++/*
++ * Proof that 'r' increments are safe-NO pointer overflows are possible:
++ *
++ * While using STEP_LOG2=5, step_start=1<<STEP_LOG2 == 32 we increment s
++ * 32 times by 1, 32 times by 2, 32 times by 3, and so on:
++ * 32*1+32*2+32*3+...+32*31 == 32*SUM(1..31) == 32*((1+31)*15+16).
++ * So, we can safely increment s by at most 31 for input block size <=
++ * 1<<13 < 15872.
++ *
++ * More precisely, STEP_LIMIT == x for any input block  calculated as follows:
++ * 1<<off_log2 >= (1<<STEP_LOG2)*((x+1)(x-1)/2+x/2) ==>
++ * 1<<(off_log2-STEP_LOG2+1) >= x^2+x-1 ==>
++ * x^2+x-1-1<<(off_log2-STEP_LOG2+1) == 0, which is solved by standard
++ * method.
++ * To avoid overhead here conservative approximate value of x is calculated
++ * as average of two nearest square roots, see STEP_LIMIT above.
++ *
++ * NOTE (change 3): step's *initial* value is additionally left-shifted
++ * by the adaptive accel bias below -- it stays within the same growth
++ * proof above since biasing only ever makes the effective STEP_LOG2
++ * larger (searches skip further per step, not more of them).
++ */
++
++static int encode_any(
++	uint16_t *const ht,
++	const uint8_t *const in0,
++	const uint8_t *const in_end,
++	uint8_t *const out,
++	uint8_t *const out_end)
++{
++	enum {
++		NR_LOG2 = NR_4KB_LOG2,
++		OFF_LOG2 = BLOCK_4KB_LOG2
++	};
++	const uint8_t *const in_end_safe = in_end - NR_COPY_MIN;
++	const uint8_t *r = in0;
++	const uint8_t *nr0 = r++;
++	uint8_t *out_at = out + 1; /* +1 for header */
++	for (; ; nr0 = r) {
++		const uint8_t *q = 0;
++		/* change 3: bias the initial search step from recent pages'
++		 * compressibility outcome (see lz4kdr_encode()'s tail). */
++		uint_fast32_t step = (1 << STEP_LOG2) << ACCEL_BIAS_GET();
++		uint_fast32_t utag = 0;
++		const uint8_t *r_end = 0;
++		uint_fast32_t r_bytes_max = 0;
++		while (true) {
++			/*
++			 * change 1: q<r guard against stale ht[] entries.
++			 * `state` is no longer memset per-call (see
++			 * lz4kdr_encode() below); a hash bucket may still
++			 * hold an offset left over from a PAST call. That
++			 * offset is always < BLOCK_4KB (a uint16_t written
++			 * only as r-in0, with in_max capped at 4096), so
++			 * q=in0+ht[h] can never read out of bounds -- but it
++			 * could point AHEAD of the current r (q>=r), which
++			 * would make utag=u_32(r-q) wrap and corrupt the
++			 * 12-bit offset field written into the compressed
++			 * stream. The q<r guard rejects exactly that case;
++			 * anything that also passes equal4() is a real,
++			 * correct match against live buffer content -- this
++			 * doesn't depend on the table ever having been
++			 * cleared, only on this one inequality. (Combined
++			 * via `&`, not `&&`: the naive short-circuit form
++			 * compiles to two separately-predicted branches, and
++			 * q<r's outcome is NOT well-predicted once the table
++			 * isn't reset every call -- that cost more in
++			 * mispredictions than the memset saved on non-trivial
++			 * data. `&` forces a single, well-predicted branch,
++			 * same branch count as upstream had.)
++			 */
++			q = hashed(in0, ht, hash(r), r);
++			if ((q < r) & equal4(q, r))
++				break;
++			++r;
++			q = hashed(in0, ht, hash(r), r);
++			if ((q < r) & equal4(q, r))
++				break;
++			if (unlikely((r += (++step >> STEP_LOG2)) > in_end_safe))
++				return out_tail(out_at, out_end, out, nr0, in_end,
++						NR_LOG2, OFF_LOG2);
++		}
++		utag = u_32(r - q);
++		r_end = repeat_end(q, r, in_end_safe, in_end);
++		r_bytes_max = u_32(r_end - r);
++		if (unlikely(nr0 == r))
++			out_at = out_repeat(out_at, utag, r_bytes_max,
++					    NR_LOG2, OFF_LOG2);
++		else
++			out_at = out_tuple(out_at, out_end, utag, nr0, r, r_bytes_max,
++					    NR_LOG2, OFF_LOG2);
++		if (unlikely((r += r_bytes_max) > in_end_safe))
++			return out_tail2(out_at, out_end, out, r, in_end,
++					 NR_LOG2, OFF_LOG2);
++		ht[hash(r - 1)] = (uint16_t)(r - 1 - in0);
++	}
++}
++
++/* not static for inlining optimization */
++int lz4kdr_encode_fast(
++	void *const state,
++	const uint8_t *const in,
++	uint8_t *const out,
++	const uint_fast32_t in_max,
++	const uint_fast32_t out_max)
++{
++	return encode_any((uint16_t*)state, in, in + in_max, out, out + out_max);
++}
++
++int lz4kdr_encode(
++	void *const state,
++	const void *const in,
++	void *out,
++	unsigned in_max,
++	unsigned out_max,
++	unsigned out_limit)
++{
++	const uint64_t io_min = min_u64(in_max, out_max);
++	const uint64_t gain_max = max_u64(GAIN_BYTES_MAX, (io_min >> GAIN_BYTES_LOG2));
++	/* ++use volatile pointers to prevent compiler optimizations */
++	const uint8_t *volatile in_end = (const uint8_t*)in + in_max;
++	const uint8_t *volatile out_end = (uint8_t*)out + out_max;
++	const void *volatile state_end =
++		(uint8_t*)state + encode_state_bytes_min();
++	if (unlikely(state == NULL))
++		return LZ4KDR_STATUS_FAILED;
++	if (unlikely(in == NULL || out == NULL))
++		return LZ4KDR_STATUS_FAILED;
++	if (unlikely(out_max <= gain_max))
++		return LZ4KDR_STATUS_FAILED;
++	if (unlikely((const uint8_t*)in >= in_end || (uint8_t*)out >= out_end))
++		return LZ4KDR_STATUS_FAILED;
++	if (unlikely(state >= state_end))
++		return LZ4KDR_STATUS_FAILED; /* pointer overflow */
++	if (in_max > (1 << BLOCK_4KB_LOG2))
++		return LZ4KDR_STATUS_FAILED;
++	if (unlikely(!out_limit || out_limit > io_min))
++		out_limit = (unsigned)io_min;
++	if (unlikely(nr_encoded_bytes_max(in_max, NR_4KB_LOG2) > out_max))
++		return 0;
++	/* change 1: memset(state) removed -- safety now rests on the q<r
++	 * guard in encode_any()'s probe loop, above. The caller must still
++	 * zero `state` once at allocation time (cold start); see
++	 * backend_lz4kdr.c's create_ctx, which kzalloc()s it. */
++	*((uint8_t*)out) = 0; /* lz4kdr header */
++	{
++		int ret;
++		ret = lz4kdr_encode_fast(state, (const uint8_t*)in,
++				(uint8_t*)out, in_max, out_limit);
++		/* change 3: update the acceleration bias from this page's
++		 * outcome. Anything <=0 or under ~12% shrinkage counts as a
++		 * "poor" page and nudges the bias up (cap ACCEL_BIAS_MAX);
++		 * any decent compression resets it. */
++		if (ret <= 0 || (uint_fast32_t)ret > (in_max - (in_max >> 3))) {
++			if (ACCEL_BIAS_GET() < ACCEL_BIAS_MAX)
++				ACCEL_BIAS_INC();
++		} else {
++			ACCEL_BIAS_RESET();
++		}
++		return ret;
++	}
++}
++EXPORT_SYMBOL(lz4kdr_encode);
++
++/* maximum encoded size for repeat and non-repeat data if "fast" encoder is used */
++uint_fast32_t lz4kdr_encoded_bytes_max(
++	uint_fast32_t nr_max,
++	uint_fast32_t r_max,
++	uint_fast32_t nr_log2,
++	uint_fast32_t off_log2)
++{
++	uint_fast32_t r = 1 + TAG_BYTES_MAX +
++		(uint32_t)round_up_to_log2(nr_max, NR_COPY_LOG2);
++	uint_fast32_t r_log2 = TAG_BITS_MAX - (off_log2 + nr_log2);
++	if (nr_max >= mask(nr_log2))
++		r += size_bytes_count(nr_max - mask(nr_log2));
++	if (r_max >= mask(r_log2)) {
++		r_max -= mask(r_log2);
++		r += (uint_fast32_t)max_u64(size_bytes_count(r_max),
++					r_max - r_max / REPEAT_MIN); /* worst case: one tag for each REPEAT_MIN */
++	}
++	return r;
++}
++EXPORT_SYMBOL(lz4kdr_encoded_bytes_max);
++
++const char *lz4kdr_version(void)
++{
++	static const char *version = "lz4kdr-1.0 (based on lz4kd 2022.03.20)";
++	return version;
++}
++EXPORT_SYMBOL(lz4kdr_version);
++
++#define LZ4KDR_PROGNAME "LZ4KDR (speed-tuned LZ4KD derivative)"
++#define LZ4KDR_AUTHOR   "Masahito Suzuki"
++
++static int __init lz4kdr_init(void)
++{
++	printk(KERN_INFO "%s %s by %s\n",
++		LZ4KDR_PROGNAME, lz4kdr_version(), LZ4KDR_AUTHOR);
++	return 0;
++}
++module_init(lz4kdr_init);
++
++MODULE_LICENSE("Dual BSD/GPL");
++MODULE_AUTHOR(LZ4KDR_AUTHOR);
++MODULE_DESCRIPTION(LZ4KDR_PROGNAME);
+diff --git a/lib/lz4kdr/lz4kdr_encode_private.h b/lib/lz4kdr/lz4kdr_encode_private.h
+new file mode 100644
+index 0000000000..364ef98f25
+--- /dev/null
++++ b/lib/lz4kdr/lz4kdr_encode_private.h
+@@ -0,0 +1,135 @@
++/* SPDX-License-Identifier: Dual BSD/GPL */
++/*
++ * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD.
++ * See include/linux/lz4kdr.h for the attribution note.
++ */
++
++#ifndef _LZ4KDR_ENCODE_PRIVATE_H
++#define _LZ4KDR_ENCODE_PRIVATE_H
++
++#include "lz4kdr_private.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++enum {
++	GAIN_BYTES_LOG2 = 6,
++	GAIN_BYTES_MAX = 1 << GAIN_BYTES_LOG2,
++	NR_COPY_LOG2 = 4,
++	NR_COPY_MIN = 1 << NR_COPY_LOG2
++};
++
++inline static uint32_t u_32(int64_t i)
++{
++	return (uint32_t)i;
++}
++
++/*
++ * Compressed data format (where {} means 0 or more occurrences, [] means
++ * optional) -- unchanged from upstream LZ4KD, LZ4KDR is wire-compatible:
++ * <24bits tag: (off_log2 rOffset| r_log2 rSize|nr_log2 nrSize)>
++ * {<nrSize byte>}[<nr bytes>]{<rSize byte>}
++ * <rSize byte> and <nrSize byte> sequences are terminated by byte != 255
++ *
++ * <nrSize bytes for whole block>+<1 terminating 0 byte>
++ */
++inline static uint_fast32_t size_bytes_count(uint_fast32_t u)
++{
++	return ((u + BYTE_MAX) >> BYTE_BITS) + 1; /* (u + BYTE_MAX - 1) / BYTE_MAX; */
++}
++
++/* maximum encoded size for non-compressible data if "fast" encoder is used */
++inline static uint_fast32_t nr_encoded_bytes_max(
++	uint_fast32_t nr_max,
++	uint_fast32_t nr_log2)
++{
++	uint_fast32_t r = 1 + TAG_BYTES_MAX + (uint32_t)round_up_to_log2(nr_max, NR_COPY_LOG2);
++	return nr_max < mask(nr_log2) ? r : r + size_bytes_count(nr_max - mask(nr_log2));
++}
++
++/* maximum encoded size for repeat and non-repeat data if "fast" encoder is used */
++uint_fast32_t lz4kdr_encoded_bytes_max(
++	uint_fast32_t nr_max,
++	uint_fast32_t r_max,
++	uint_fast32_t nr_log2,
++	uint_fast32_t off_log2);
++
++inline static const uint8_t *hashed(
++	const uint8_t *const in0,
++	uint16_t *const ht,
++	uint_fast32_t h,
++	const uint8_t *r)
++{
++	const uint8_t *q = in0 + ht[h];
++	ht[h] = (uint16_t)(r - in0);
++	return q;
++}
++
++inline static const uint8_t *repeat_start(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const nr0,
++	const uint8_t *const in0)
++{
++	for (; r > nr0 && likely(q > in0) && unlikely(q[-1] == r[-1]); --q, --r);
++	return r;
++}
++
++static inline bool match_max(
++		const uint8_t *q,
++		const uint8_t *s,
++		const uint_fast32_t r_max)
++{
++	return equal4(q + r_max - REPEAT_MIN, s + r_max - REPEAT_MIN) &&
++		equal4(q, s);
++}
++
++int lz4kdr_out_tail(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	const uint8_t *const out,
++	const uint8_t *const nr0,
++	const uint8_t *const in_end,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool check_out);
++
++uint8_t *lz4kdr_out_tuple(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	const uint8_t *const nr0,
++	const uint8_t *const r,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	bool check_out);
++
++uint8_t *lz4kdr_out_repeat(
++	uint8_t *out_at,
++	uint8_t *const out_end,
++	uint_fast32_t utag,
++	uint_fast32_t r_bytes_max,
++	const uint_fast32_t nr_log2,
++	const uint_fast32_t off_log2,
++	const bool check_out);
++
++const uint8_t *lz4kdr_repeat_end(
++	const uint8_t *q,
++	const uint8_t *r,
++	const uint8_t *const in_end_safe,
++	const uint8_t *const in_end);
++
++int lz4kdr_encode_fast(
++	void *const state,
++	const uint8_t *const in,
++	uint8_t *const out,
++	const uint_fast32_t in_max,
++	const uint_fast32_t out_max);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* _LZ4KDR_ENCODE_PRIVATE_H */
+diff --git a/lib/lz4kdr/lz4kdr_private.h b/lib/lz4kdr/lz4kdr_private.h
+new file mode 100644
+index 0000000000..73d6e8da90
+--- /dev/null
++++ b/lib/lz4kdr/lz4kdr_private.h
+@@ -0,0 +1,317 @@
++/* SPDX-License-Identifier: Dual BSD/GPL */
++/*
++ * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD. See include/linux/
++ * lz4kdr.h for the attribution note and what changed vs. upstream.
++ *
++ * This file (private.h/encode_private.h/decode.c) is otherwise a
++ * straight, unmodified port of upstream LZ4KD's internals -- every
++ * behavioral change lives in lz4kdr_encode.c, called out inline where
++ * it occurs.
++ */
++
++#ifndef _LZ4KDR_PRIVATE_H
++#define _LZ4KDR_PRIVATE_H
++
++#if !defined(__KERNEL__)
++
++/* userspace compat shim, for testing against the same corpora/harness
++ * used in the lz4kdr benchmark suite this was validated with */
++#include <stdint.h>
++#include <stddef.h>
++#include <stdbool.h>
++#include <string.h>
++
++typedef uint64_t uint_fast32_t;
++typedef int64_t int_fast32_t;
++
++#define likely(x)   __builtin_expect(!!(x), 1)
++#define unlikely(x) __builtin_expect(!!(x), 0)
++
++#define EXPORT_SYMBOL(x)
++#define MODULE_LICENSE(x)
++#define MODULE_DESCRIPTION(x)
++
++#else /* __KERNEL__ */
++
++#include <linux/lz4kdr.h>
++#include <linux/string.h> /* memcpy() */
++#include <linux/types.h> /* uint8_t, int8_t, uint16_t, int16_t,
++uint32_t, int32_t, uint64_t, int64_t */
++#include <linux/module.h>
++#include <stddef.h>
++
++typedef uint64_t uint_fast32_t;
++typedef int64_t int_fast32_t;
++
++#endif /* __KERNEL__ */
++
++#if defined(__GNUC__) && (__GNUC__>=4)
++#define LZ4K_WITH_GCC_INTRINSICS
++#endif
++
++enum {
++	BYTE_BITS = 8UL,
++	WORD_BITS = 32U,
++	DWORD_BITS = 64UL,
++	BYTE_BITS_LOG2 = 3,
++	BYTE_MAX = 255U,
++	REPEAT_MIN = 4,
++	TAG_BYTES_MAX = 3,
++	TAG_BITS_MAX  = TAG_BYTES_MAX * 8,
++	BLOCK_4KB_LOG2  = 12,
++	BLOCK_8KB_LOG2  = 13,
++	NR_8KB_LOG2 = 5, /* for encoded_bytes_max */
++	NR_4KB_LOG2 = 6,
++	PATTERN_BYTES_MAX = 8 /* 1 bytes for header, 8 bytes for pattern */
++};
++
++inline static uint32_t mask(uint_fast32_t log2)
++{
++	return (1U << log2) - 1U;
++}
++
++inline static uint64_t mask64(uint_fast32_t log2)
++{
++	return (1ULL << log2) - 1ULL;
++}
++
++#if defined LZ4K_WITH_GCC_INTRINSICS
++inline static int most_significant_bit_of(uint64_t u)
++{
++	return (int)(__builtin_expect((u) == 0, false) ?
++		     -1 : (int)((WORD_BITS - 1) ^ (uint32_t)__builtin_clz((unsigned)(u))));
++}
++#else /* #!defined LZ4K_WITH_GCC_INTRINSICS */
++#error undefined most_significant_bit_of(unsigned u)
++#endif /* #if defined LZ4K_WITH_GCC_INTRINSICS */
++
++inline static uint64_t max_u64(uint64_t a, uint64_t b)
++{
++	return a > b ? a : b;
++}
++
++inline static uint64_t min_u64(uint64_t a, uint64_t b)
++{
++	return a < b ? a : b;
++}
++
++inline static void m_copy(void *dst, const void *src, size_t total)
++{
++	(void)__builtin_memcpy(dst, src, total);
++}
++
++inline static void m_set(void *dst, uint8_t value, size_t total)
++{
++	(void)__builtin_memset(dst, value, total);
++}
++
++inline static uint64_t round_down_to_log2(uint64_t u, uint8_t log2)
++{
++	return (uint64_t)(u & ~mask64(log2));
++}
++
++inline static uint64_t round_up_to_log2(uint64_t u, uint8_t log2)
++{
++	return (uint64_t)((u + mask64(log2)) & ~mask64(log2));
++}
++
++inline static uint64_t round_up_to_power_of2(uint64_t u)
++{
++	const int_fast32_t msb = most_significant_bit_of(u);
++	return round_up_to_log2(u, (uint8_t)msb);
++}
++
++inline static void *align_pointer_up_to_log2(const void *p, uint8_t log2)
++{
++	return (void*)round_up_to_log2((uint64_t)p, log2);
++}
++
++inline static uint32_t read3_at(const void *p)
++{
++	uint32_t result = 0;
++	m_copy(&result, p, 1 + 1 + 1);
++	return result;
++}
++
++inline static uint32_t read4_at(const void *p)
++{
++	uint32_t result;
++	m_copy(&result, p, sizeof(result));
++	return result;
++}
++
++inline static uint64_t read8_at(const void *p)
++{
++	uint64_t result;
++	m_copy(&result, p, sizeof(result));
++	return result;
++}
++
++inline static bool equal3(const uint8_t *const q, const uint8_t *const r)
++{
++	return (read4_at(q) << BYTE_BITS) == (read4_at(r) << BYTE_BITS);
++}
++
++inline static bool equal3pv(const uint8_t *const q, const uint64_t rv)
++{
++	return (read4_at(q) << BYTE_BITS) == ((uint32_t)rv << BYTE_BITS);
++}
++
++inline static bool equal4(const uint8_t *const q, const uint8_t *const r)
++{
++	return read4_at(q) == read4_at(r);
++}
++
++inline static bool equal4pv(const uint8_t *const q, const uint64_t rv)
++{
++	return read4_at(q) == (uint32_t)rv;
++}
++
++inline static bool equal8(const uint8_t *const q, const uint8_t *const r)
++{
++	return read8_at(q) == read8_at(r);
++}
++
++inline static uint_fast32_t hash24v(const uint64_t r, uint32_t shift)
++{
++	const uint32_t hash24_factor = 3266489917U;
++	return (((uint32_t)r << BYTE_BITS) * hash24_factor) >> (WORD_BITS - shift);
++}
++
++inline static uint_fast32_t hash24(const uint8_t *r, uint32_t shift)
++{
++	return hash24v(read4_at(r), shift);
++}
++
++inline static uint_fast32_t hash32v_2(const uint64_t r, uint32_t shift)
++{
++	const uint32_t hash32_2_factor = 3266489917U;
++	return ((uint32_t)r * hash32_2_factor) >> (WORD_BITS - shift);
++}
++
++inline static uint_fast32_t hash32_2(const uint8_t *r, uint32_t shift)
++{
++	return hash32v_2(read4_at(r), shift);
++}
++
++inline static uint_fast32_t hash32v(const uint64_t r, uint32_t shift)
++{
++	const uint32_t hash32_factor = 2654435761U;
++	return ((uint32_t)r * hash32_factor) >> (WORD_BITS - shift);
++}
++
++inline static uint_fast32_t hash32(const uint8_t *r, uint32_t shift)
++{
++	return hash32v(read4_at(r), shift);
++}
++
++inline static uint_fast32_t hash64v_5b(const uint64_t r, uint32_t shift)
++{
++	const uint64_t m = 889523592379ULL;
++	const uint64_t up_shift = 24;
++	return (uint32_t)(((r << up_shift) * m) >> (DWORD_BITS - shift));
++}
++
++inline static uint_fast32_t hash64_5b(const uint8_t *r, uint32_t shift)
++{
++	return hash64v_5b(read8_at(r), shift);
++}
++
++inline static uint_fast32_t hash64v_6b(const uint64_t r, uint32_t shift)
++{
++	const uint64_t m = 227718039650203ULL;
++	const uint64_t up_shift = 16;
++	return (uint32_t)(((r << up_shift) * m) >> (DWORD_BITS - shift));
++}
++
++inline static uint_fast32_t hash64_6b(const uint8_t *r, uint32_t shift)
++{
++	return hash64v_6b(read8_at(r), shift);
++}
++
++inline static uint_fast32_t hash64v_7b(const uint64_t r, uint32_t shift)
++{
++	const uint64_t m = 58295818150454627ULL;
++	const uint64_t up_shift = 8;
++	return (uint32_t)(((r << up_shift) * m) >> (DWORD_BITS - shift));
++}
++
++inline static uint_fast32_t hash64_7b(const uint8_t *r, uint32_t shift)
++{
++	return hash64v_7b(read8_at(r), shift);
++}
++
++inline static uint_fast32_t hash64v_8b(const uint64_t r, uint32_t shift)
++{
++	const uint64_t m = 2870177450012600261ULL;
++	return (uint32_t)((r * m) >> (DWORD_BITS - shift));
++}
++
++inline static uint_fast32_t hash64_8b(const uint8_t *r, uint32_t shift)
++{
++	return hash64v_8b(read8_at(r), shift);
++}
++
++inline static void while_lt_copy_x(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	for (; dst < dst_end; dst += copy_min, src += copy_min)
++		m_copy(dst, src, copy_min);
++}
++
++inline static void copy_x_while_lt(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	m_copy(dst, src, copy_min);
++	while (dst + copy_min < dst_end)
++		m_copy(dst += copy_min, src += copy_min, copy_min);
++}
++
++inline static void copy_x_while_total(
++	uint8_t *dst,
++	const uint8_t *src,
++	size_t total,
++	const size_t copy_min)
++{
++	m_copy(dst, src, copy_min);
++	for (; total > copy_min; total -= copy_min)
++		m_copy(dst += copy_min, src += copy_min, copy_min);
++}
++
++inline static void copy_2x(
++	uint8_t *dst,
++	const uint8_t *src,
++	const size_t copy_min)
++{
++	m_copy(dst, src, copy_min);
++	m_copy(dst + copy_min, src + copy_min, copy_min);
++}
++
++inline static void copy_2x_as_x2_while_lt(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	copy_2x(dst, src, copy_min);
++	while (dst + (copy_min << 1) < dst_end)
++		copy_2x(dst += (copy_min << 1), src += (copy_min << 1), copy_min);
++}
++
++inline static void while_lt_copy_2x_as_x2(
++	uint8_t *dst,
++	const uint8_t *src,
++	const uint8_t *dst_end,
++	const size_t copy_min)
++{
++	for (; dst < dst_end; dst += (copy_min << 1), src += (copy_min << 1))
++		copy_2x(dst, src, copy_min);
++}
++
++#endif /* _LZ4KDR_PRIVATE_H */
+-- 
+2.34.1
+
