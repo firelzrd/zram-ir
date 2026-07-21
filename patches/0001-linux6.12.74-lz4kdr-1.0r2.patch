@@ -1,7 +1,7 @@
-From 72f42e59265b76c8d535e826a1027be220138abf Mon Sep 17 00:00:00 2001
+From 4b5154b73b85efed40b31f3e4d192f348d1aa3b7 Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
 Date: Tue, 21 Jul 2026 09:33:30 +0900
-Subject: [PATCH] linux6.12.74-lz4kdr-1.0
+Subject: [PATCH] linux6.12.74-lz4kdr-1.0r2
 
 ---
  drivers/block/zram/Kconfig          |  17 +
@@ -16,8 +16,8 @@ Subject: [PATCH] linux6.12.74-lz4kdr-1.0
  lib/lz4kdr/lz4kdr_decode.c          | 249 +++++++++++++
  lib/lz4kdr/lz4kdr_encode.c          | 559 ++++++++++++++++++++++++++++
  lib/lz4kdr/lz4kdr_encode_private.h  | 135 +++++++
- lib/lz4kdr/lz4kdr_private.h         | 317 ++++++++++++++++
- 13 files changed, 1491 insertions(+)
+ lib/lz4kdr/lz4kdr_private.h         | 316 ++++++++++++++++
+ 13 files changed, 1490 insertions(+)
  create mode 100644 drivers/block/zram/backend_lz4kdr.c
  create mode 100644 drivers/block/zram/backend_lz4kdr.h
  create mode 100644 include/linux/lz4kdr.h
@@ -1328,10 +1328,10 @@ index 0000000000..364ef98f25
 +#endif /* _LZ4KDR_ENCODE_PRIVATE_H */
 diff --git a/lib/lz4kdr/lz4kdr_private.h b/lib/lz4kdr/lz4kdr_private.h
 new file mode 100644
-index 0000000000..73d6e8da90
+index 0000000000..f78e52cf5f
 --- /dev/null
 +++ b/lib/lz4kdr/lz4kdr_private.h
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,316 @@
 +/* SPDX-License-Identifier: Dual BSD/GPL */
 +/*
 + * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD. See include/linux/
@@ -1372,7 +1372,6 @@ index 0000000000..73d6e8da90
 +#include <linux/types.h> /* uint8_t, int8_t, uint16_t, int16_t,
 +uint32_t, int32_t, uint64_t, int64_t */
 +#include <linux/module.h>
-+#include <stddef.h>
 +
 +typedef uint64_t uint_fast32_t;
 +typedef int64_t int_fast32_t;
