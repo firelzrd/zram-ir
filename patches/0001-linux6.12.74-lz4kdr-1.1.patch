@@ -1,12 +1,12 @@
-From 4b5154b73b85efed40b31f3e4d192f348d1aa3b7 Mon Sep 17 00:00:00 2001
+From 93fb9e6ef6486a2d5b50d51c07c82276de8988eb Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
-Date: Tue, 21 Jul 2026 09:33:30 +0900
-Subject: [PATCH] linux6.12.74-lz4kdr-1.0r2
+Date: Wed, 22 Jul 2026 07:34:43 +0900
+Subject: [PATCH] linux6.12.74-lz4kdr-1.1
 
 ---
  drivers/block/zram/Kconfig          |  17 +
  drivers/block/zram/Makefile         |   1 +
- drivers/block/zram/backend_lz4kdr.c | 108 ++++++
+ drivers/block/zram/backend_lz4kdr.c | 132 +++++++
  drivers/block/zram/backend_lz4kdr.h |  10 +
  drivers/block/zram/zcomp.c          |   4 +
  include/linux/lz4kdr.h              |  80 ++++
@@ -17,7 +17,7 @@ Subject: [PATCH] linux6.12.74-lz4kdr-1.0r2
  lib/lz4kdr/lz4kdr_encode.c          | 559 ++++++++++++++++++++++++++++
  lib/lz4kdr/lz4kdr_encode_private.h  | 135 +++++++
  lib/lz4kdr/lz4kdr_private.h         | 316 ++++++++++++++++
- 13 files changed, 1490 insertions(+)
+ 13 files changed, 1514 insertions(+)
  create mode 100644 drivers/block/zram/backend_lz4kdr.c
  create mode 100644 drivers/block/zram/backend_lz4kdr.h
  create mode 100644 include/linux/lz4kdr.h
@@ -90,10 +90,10 @@ index 0fdefd5766..c239bb246a 100644
  zram-$(CONFIG_ZRAM_BACKEND_842)		+= backend_842.o
 diff --git a/drivers/block/zram/backend_lz4kdr.c b/drivers/block/zram/backend_lz4kdr.c
 new file mode 100644
-index 0000000000..6863f8803a
+index 0000000000..38246434fd
 --- /dev/null
 +++ b/drivers/block/zram/backend_lz4kdr.c
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,132 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * zram backend for LZ4KDR (see include/linux/lz4kdr.h for what it is
@@ -174,8 +174,32 @@ index 0000000000..6863f8803a
 +	ret = lz4kdr_encode(zctx->ht, req->src, req->dst,
 +			    (unsigned int)req->src_len,
 +			    (unsigned int)req->dst_len, 0);
-+	if (ret <= 0)
++	if (ret < 0)
 +		return -EINVAL;
++	if (ret == 0) {
++		/*
++		 * INCOMPRESSIBLE (not an error): lz4kdr bailed early because
++		 * the page won't beat its out_limit. This is exactly the case
++		 * zram handles by storing the page raw -- LZ4/zstd signal it by
++		 * returning a comp_len >= huge_class_size, which they always
++		 * can because their dst buffer is oversized; lz4kdr instead has
++		 * an explicit "0 == did not compress" verdict. Report a
++		 * full-page length so zram_write_page() takes its huge/raw-store
++		 * path (comp_len == PAGE_SIZE), or, under CONFIG_ZRAM_MULTI_COMP
++		 * / ZRAM-IR, retries the page with the next (higher-ratio)
++		 * compressor.
++		 *
++		 * Returning -EINVAL here (as `ret <= 0` did) makes
++		 * zcomp_compress() fail the whole write: zram_write_page() then
++		 * bails with "Compression failed!" instead of storing the page,
++		 * so reclaim can't evict it. Under memory pressure that stalls
++		 * reclaim and fires the OOM killer the instant swapout hits its
++		 * first incompressible page. req->src_len is PAGE_SIZE for zram
++		 * writes, which is the sentinel the raw-store path keys on.
++		 */
++		req->dst_len = req->src_len;
++		return 0;
++	}
 +	req->dst_len = ret;
 +	return 0;
 +}
@@ -622,7 +646,7 @@ index 0000000000..d2ccae1ceb
 +MODULE_DESCRIPTION("LZ4KDR decoder (speed-tuned LZ4KD derivative)");
 diff --git a/lib/lz4kdr/lz4kdr_encode.c b/lib/lz4kdr/lz4kdr_encode.c
 new file mode 100644
-index 0000000000..0b9e7db274
+index 0000000000..e391e40f1f
 --- /dev/null
 +++ b/lib/lz4kdr/lz4kdr_encode.c
 @@ -0,0 +1,559 @@
@@ -1166,7 +1190,7 @@ index 0000000000..0b9e7db274
 +
 +const char *lz4kdr_version(void)
 +{
-+	static const char *version = "lz4kdr-1.0 (based on lz4kd 2022.03.20)";
++	static const char *version = "lz4kdr-1.1";
 +	return version;
 +}
 +EXPORT_SYMBOL(lz4kdr_version);
