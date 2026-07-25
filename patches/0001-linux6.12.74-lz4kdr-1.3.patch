@@ -1,24 +1,24 @@
-From ad8d7385d3c699affd865ae81aa3c53fb4f93422 Mon Sep 17 00:00:00 2001
+From 849c3b7f5fe04cb0975d92fd0a81e8b2307d6c17 Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
-Date: Thu, 23 Jul 2026 04:48:29 +0900
-Subject: [PATCH] linux6.12.74-lz4kdr-1.2
+Date: Sat, 25 Jul 2026 14:55:09 +0900
+Subject: [PATCH] linux6.12.74-lz4kdr-1.3
 
 ---
  drivers/block/zram/Kconfig          |  18 +
  drivers/block/zram/Makefile         |   1 +
- drivers/block/zram/backend_lz4kdr.c | 132 +++++++
+ drivers/block/zram/backend_lz4kdr.c | 132 ++++++
  drivers/block/zram/backend_lz4kdr.h |  10 +
  drivers/block/zram/zcomp.c          |   4 +
  include/linux/lz4kdr.h              |  78 ++++
  lib/Kconfig                         |   6 +
  lib/Makefile                        |   2 +
  lib/lz4kdr/Makefile                 |   3 +
- lib/lz4kdr/lz4kdr_decode.c          | 249 +++++++++++++
- lib/lz4kdr/lz4kdr_encode.c          | 550 ++++++++++++++++++++++++++++
- lib/lz4kdr/lz4kdr_encode_private.h  | 135 +++++++
- lib/lz4kdr/lz4kdr_private.h         | 316 ++++++++++++++++
- lib/lz4kdr/version.h                |  21 ++
- 14 files changed, 1525 insertions(+)
+ lib/lz4kdr/lz4kdr_decode.c          | 249 +++++++++++
+ lib/lz4kdr/lz4kdr_encode.c          | 617 ++++++++++++++++++++++++++++
+ lib/lz4kdr/lz4kdr_encode_private.h  | 135 ++++++
+ lib/lz4kdr/lz4kdr_private.h         | 316 ++++++++++++++
+ lib/lz4kdr/version.h                |  21 +
+ 14 files changed, 1592 insertions(+)
  create mode 100644 drivers/block/zram/backend_lz4kdr.c
  create mode 100644 drivers/block/zram/backend_lz4kdr.h
  create mode 100644 include/linux/lz4kdr.h
@@ -647,17 +647,17 @@ index 0000000000..d2ccae1ceb
 +MODULE_DESCRIPTION("LZ4KDR decoder (speed-tuned LZ4KD derivative)");
 diff --git a/lib/lz4kdr/lz4kdr_encode.c b/lib/lz4kdr/lz4kdr_encode.c
 new file mode 100644
-index 0000000000..1230ec1ac5
+index 0000000000..903a353a05
 --- /dev/null
 +++ b/lib/lz4kdr/lz4kdr_encode.c
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,617 @@
 +// SPDX-License-Identifier: Dual BSD/GPL
 +/*
 + * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD. See include/linux/
 + * lz4kdr.h for the attribution note and lz4kdr_decode.c's header for
 + * why decode is untouched.
 + *
-+ * This encoder carries three changes vs. upstream LZ4KD, each
++ * This encoder carries five changes vs. upstream LZ4KD, each
 + * independently measured positive across four synthetic benchmark
 + * corpora (zero/high/medium/low compressibility) AND three real-world
 + * corpora (a compiled executable, an already-compressed video, real
@@ -674,11 +674,34 @@ index 0000000000..1230ec1ac5
 + *   3. Adaptive search-step acceleration, now backed by a genuine
 + *      per-CPU variable (this needed a real kernel home; the
 + *      benchmark's file-scope static was an acknowledged stand-in).
++ *   4. One 8-byte read feeds both of the probe loop's hash lookups
++ *      per iteration instead of two separate reads.
++ *   5. Branchless tag-escape-field selection in the two hot tag-write
++ *      paths (update_utag(), out_repeat()).
 + *
-+ * A fourth change -- an AVX2 32B vectorized match-length scan in
-+ * repeat_end() -- was implemented, benchmarked, and REMOVED. It was a
-+ * huge win on the synthetic zero/high corpora (+40-54%) but a real
-+ * 7-24% REGRESSION on real compiled-executable data: matches in real
++ * Changes 4 and 5 were originally measured as isolated net LOSSES
++ * against plain upstream LZ4KD (dual-hash: -2.2%/-3.5% on zero/high;
++ * branchless tag: -2.0%/-5.7%) and excluded from the first release of
++ * this encoder (1.0-1.2, changes 1-3 only). Re-testing them on TOP of
++ * changes 1-3 instead of plain upstream found they flip to real wins
++ * on zero/high (+7.8-8.5% each, +10-11% stacked) with no new
++ * regression elsewhere: changes 1-3 already sped up everything else
++ * in the probe loop and tag-write path on long-run-heavy data, so the
++ * same fixed per-call cost these two changes remove became a bigger
++ * share of a now-smaller total runtime. This is the same bottleneck-
++ * shift mechanism documented in the userspace suite's RESULTS.md
++ * ("Bottleneck-shift synergy re-test" section) -- see it for the full
++ * paired-benchmark methodology and numbers, including why a naive
++ * single-shot comparison initially looked like a much bigger (and
++ * wrong) win before controlling for CPU turbo/warm-up drift.
++ *
++ * An AVX2 32B vectorized match-length scan in repeat_end() -- and,
++ * separately, a hardware-CRC32 hash (superseded outright by change 4,
++ * which removes the only call site CRC32 would have sped up) -- were
++ * also implemented, benchmarked, and REMOVED. The AVX2 scan was a
++ * huge win on the synthetic zero/high corpora (+40-54%, +61-90% on
++ * top of changes 1-5) but a real 7-24% REGRESSION on real compiled-
++ * executable data in every combination tested: matches in real
 + * machine code rarely run past a handful of bytes, so the vector
 + * path's fixed load+compare+movemask cost gets paid on nearly every
 + * match found and essentially never amortized -- wider vectors made
@@ -686,7 +709,7 @@ index 0000000000..1230ec1ac5
 + * regressed them more than SSE2). Two rounds of heuristic gating (an
 + * 8-byte peek before committing to the vector loop, then a page-level
 + * adaptive on/off streak mirroring change 3's mechanism) only
-+ * partially closed the gap, down to a residual ~8% regression at
++ * partially closed the gap, down to a residual ~8-10% regression at
 + * best, and the page-level version underperformed the simpler
 + * per-match peek. Rather than ship a partial fix for a real
 + * regression on an extremely common real-world zram content type
@@ -777,6 +800,22 @@ index 0000000000..1230ec1ac5
 +		TAG_BYTES_MAX + size_bytes_count(in_max - mask(nr_log2)) + in_max;
 +}
 +
++/*
++ * change 5: branchless escape-field selection. `cond ? a : b` on these
++ * hot tag-write paths becomes a 0/-1 select mask combined with &/| --
++ * see update_utag() and out_repeat() below, and the top-of-file
++ * comment for why this flips positive once changes 1-3 have already
++ * sped up everything else around it (isolated against plain upstream,
++ * it's a net loss: the branch is usually well-predicted since escapes
++ * are rare, and unconditionally computing both sides costs more than
++ * that saves).
++ */
++inline static uint_fast32_t branchless_select(bool cond, uint_fast32_t a, uint_fast32_t b)
++{
++	const uint_fast32_t m = (uint_fast32_t)0 - (uint_fast32_t)cond;
++	return (a & m) | (b & ~m);
++}
++
 +inline static void  update_utag(
 +	uint_fast32_t r_bytes_max,
 +	uint_fast32_t *utag,
@@ -784,8 +823,9 @@ index 0000000000..1230ec1ac5
 +	const uint_fast32_t off_log2)
 +{
 +	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
-+	*utag |= likely(r_bytes_max - REPEAT_MIN < r_mask) ?
-+		 ((r_bytes_max - REPEAT_MIN) << off_log2) : (r_mask << off_log2);
++	*utag |= branchless_select(r_bytes_max - REPEAT_MIN < r_mask,
++				    (r_bytes_max - REPEAT_MIN) << off_log2,
++				    r_mask << off_log2);
 +}
 +
 +inline static uint8_t *out_size_bytes(uint8_t *out_at, uint_fast32_t u)
@@ -905,14 +945,15 @@ index 0000000000..1230ec1ac5
 +	const uint_fast32_t off_log2)
 +{
 +	const uint_fast32_t r_mask = mask(TAG_BITS_MAX - (off_log2 + nr_log2));
-+	if (likely(r_bytes_max - REPEAT_MIN < r_mask)) {
-+		utag |= ((r_bytes_max - REPEAT_MIN) << off_log2);
-+		m_copy(out_at, &utag, TAG_BYTES_MAX);
-+		out_at += TAG_BYTES_MAX;
-+	} else {
++	const bool no_escape = r_bytes_max - REPEAT_MIN < r_mask;
++	utag |= branchless_select(no_escape,
++				   (r_bytes_max - REPEAT_MIN) << off_log2,
++				   r_mask << off_log2);
++	m_copy(out_at, &utag, TAG_BYTES_MAX);
++	out_at += TAG_BYTES_MAX;
++	if (unlikely(!no_escape)) {
 +		uint_fast32_t bytes_left = r_bytes_max - REPEAT_MIN - r_mask;
-+		utag |= (r_mask << off_log2);
-+		out_at = out_utag_then_bytes_left(out_at, utag, bytes_left);
++		out_at = out_size_bytes(out_at, bytes_left);
 +	}
 +	return out_at; /* SUCCESS: continue compression */
 +}
@@ -1064,9 +1105,9 @@ index 0000000000..1230ec1ac5
 +			 * would make utag=u_32(r-q) wrap and corrupt the
 +			 * 12-bit offset field written into the compressed
 +			 * stream. The q<r guard rejects exactly that case;
-+			 * anything that also passes equal4() is a real,
-+			 * correct match against live buffer content -- this
-+			 * doesn't depend on the table ever having been
++			 * anything that also passes equal4()/equal4pv() is a
++			 * real, correct match against live buffer content --
++			 * this doesn't depend on the table ever having been
 +			 * cleared, only on this one inequality. (Combined
 +			 * via `&`, not `&&`: the naive short-circuit form
 +			 * compiles to two separately-predicted branches, and
@@ -1074,15 +1115,41 @@ index 0000000000..1230ec1ac5
 +			 * isn't reset every call -- that cost more in
 +			 * mispredictions than the memset saved on non-trivial
 +			 * data. `&` forces a single, well-predicted branch,
-+			 * same branch count as upstream had.)
++			 * same branch count as upstream had.) This guard
++			 * applies to both of change 4's probes below, same as
++			 * it did to the two separate hashed() calls it
++			 * replaced.
 +			 */
-+			q = hashed(in0, ht, hash(r), r);
-+			if ((q < r) & equal4(q, r))
-+				break;
-+			++r;
-+			q = hashed(in0, ht, hash(r), r);
-+			if ((q < r) & equal4(q, r))
-+				break;
++			/*
++			 * change 4: one 8-byte read feeds BOTH this
++			 * iteration's hash lookups. hash64_5b/hash64v_5b only
++			 * consume the low 5 bytes of their input (via <<24),
++			 * so v's low 5 bytes = r[0..5) hash position r, and
++			 * (v>>8)'s low 5 bytes = r[1..6) hash position r+1 --
++			 * one load instead of two, and both ht[] loads/hashes
++			 * can issue back to back instead of waiting on the
++			 * first equal4pv(). This bypasses hash()/hashed()
++			 * entirely for the probe loop; hash() is still used
++			 * once per match below (ht[hash(r - 1)]), just far
++			 * less often than it was called here.
++			 */
++			{
++				const uint64_t v = read8_at(r);
++				const uint_fast32_t h0 = hash64v_5b(v, HT_LOG2);
++				q = in0 + ht[h0];
++				ht[h0] = (uint16_t)(r - in0);
++				if ((q < r) & equal4pv(q, v))
++					break;
++				++r;
++				{
++					const uint64_t v1 = v >> 8;
++					const uint_fast32_t h1 = hash64v_5b(v1, HT_LOG2);
++					q = in0 + ht[h1];
++					ht[h1] = (uint16_t)(r - in0);
++					if ((q < r) & equal4pv(q, v1))
++						break;
++				}
++			}
 +			if (unlikely((r += (++step >> STEP_LOG2)) > in_end_safe))
 +				return out_tail(out_at, out_end, out, nr0, in_end,
 +						NR_LOG2, OFF_LOG2);
@@ -1666,7 +1733,7 @@ index 0000000000..f78e52cf5f
 +#endif /* _LZ4KDR_PRIVATE_H */
 diff --git a/lib/lz4kdr/version.h b/lib/lz4kdr/version.h
 new file mode 100644
-index 0000000000..e0d0cdfdbf
+index 0000000000..ea824117b6
 --- /dev/null
 +++ b/lib/lz4kdr/version.h
 @@ -0,0 +1,21 @@
@@ -1688,7 +1755,7 @@ index 0000000000..e0d0cdfdbf
 +#define LZ4KDR_PROGNAME	"LZ4KDR (speed-tuned LZ4KD derivative)"
 +#define LZ4KDR_AUTHOR	"Masahito Suzuki"
 +
-+#define LZ4KDR_VERSION	"1.2"
++#define LZ4KDR_VERSION	"1.3"
 +
 +#endif /* _LIB_LZ4KDR_VERSION_H */
 -- 
