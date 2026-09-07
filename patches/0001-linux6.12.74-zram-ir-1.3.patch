@@ -1,14 +1,14 @@
-From 5ab199ab3e919ce847a95f1aa336bc18a188a8b6 Mon Sep 17 00:00:00 2001
+From e76c9c8ae2045a3165e7fc9ad1bcb53e8785e0a5 Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
-Date: Tue, 21 Jul 2026 09:19:18 +0900
-Subject: [PATCH] linux6.12.74-zram-ir-1.2
+Date: Tue, 8 Sep 2026 01:31:23 +0900
+Subject: [PATCH] linux6.12.74-zram-ir-1.3
 
 ---
- drivers/block/zram/zram_drv.c | 113 ++++++++++++++++++++++++++--------
- 1 file changed, 87 insertions(+), 26 deletions(-)
+ drivers/block/zram/zram_drv.c | 114 ++++++++++++++++++++++++++--------
+ 1 file changed, 88 insertions(+), 26 deletions(-)
 
 diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
-index 76b326ddd7..4642c43f48 100644
+index 76b326ddd7..c8272bfa44 100644
 --- a/drivers/block/zram/zram_drv.c
 +++ b/drivers/block/zram/zram_drv.c
 @@ -34,6 +34,7 @@
@@ -51,14 +51,14 @@ index 76b326ddd7..4642c43f48 100644
 +	struct zcomp_strm *zstrm = NULL;
  	unsigned long element = 0;
  	enum zram_pageflags flags = 0;
-+	u8 prio, prio_max = zram->num_active_comps;
++	u8 prio, prio_max = zram->num_active_comps, last_prio = ZRAM_PRIMARY_COMP;
 +#ifdef CONFIG_ZRAM_MULTI_COMP
 +	prio_max = min_t(u8, prio_max, sysctl_zram_recomp_immediate + 1);
 +#endif //CONFIG_ZRAM_MULTI_COMP
  
  	mem = kmap_local_page(page);
  	if (page_same_filled(mem, &element)) {
-@@ -1545,21 +1567,43 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+@@ -1545,21 +1567,44 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
  	kunmap_local(mem);
  
  compress_again:
@@ -76,6 +76,7 @@ index 76b326ddd7..4642c43f48 100644
 +	for (prio = ZRAM_PRIMARY_COMP; prio < prio_max; prio++) {
 +		if (!zram->comps[prio])
 +			continue;
++		last_prio = prio;
 +
 +		zstrm = zcomp_stream_get(zram->comps[prio]);
 +		src = kmap_local_page(page);
@@ -107,14 +108,14 @@ index 76b326ddd7..4642c43f48 100644
 +		 */
 +		if (prio >= zram->num_active_comps)
 +			flags = ZRAM_INCOMPRESSIBLE;
-+		prio--;
++		prio = last_prio;
  		comp_len = PAGE_SIZE;
 +		zstrm = zcomp_stream_get(zram->comps[prio]);
 +	}
  	/*
  	 * handle allocation has 2 paths:
  	 * a) fast path is executed with preemption disabled (for
-@@ -1580,7 +1624,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+@@ -1580,7 +1625,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
  				__GFP_HIGHMEM |
  				__GFP_MOVABLE);
  	if (IS_ERR_VALUE(handle)) {
@@ -123,7 +124,7 @@ index 76b326ddd7..4642c43f48 100644
  		atomic64_inc(&zram->stats.writestall);
  		handle = zs_malloc(zram->mem_pool, comp_len,
  				GFP_NOIO | __GFP_HIGHMEM |
-@@ -1597,14 +1641,14 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+@@ -1597,14 +1642,14 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
  		 * zstrm buffer back. It is necessary that the dereferencing
  		 * of the zstrm variable below occurs correctly.
  		 */
@@ -140,7 +141,7 @@ index 76b326ddd7..4642c43f48 100644
  		zs_free(zram->mem_pool, handle);
  		return -ENOMEM;
  	}
-@@ -1618,7 +1662,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+@@ -1618,7 +1663,7 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
  	if (comp_len == PAGE_SIZE)
  		kunmap_local(src);
  
@@ -149,7 +150,7 @@ index 76b326ddd7..4642c43f48 100644
  	zs_unmap_object(zram->mem_pool, handle);
  	atomic64_add(comp_len, &zram->stats.compr_data_size);
  out:
-@@ -1629,18 +1673,22 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
+@@ -1629,18 +1674,22 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
  	zram_slot_lock(zram, index);
  	zram_free_page(zram, index);
  
@@ -181,12 +182,12 @@ index 76b326ddd7..4642c43f48 100644
  	}
  	zram_slot_unlock(zram, index);
  
-@@ -2615,6 +2663,15 @@ static int __init zram_init(void)
+@@ -2615,6 +2664,15 @@ static int __init zram_init(void)
  		num_devices--;
  	}
  
 +#ifdef CONFIG_ZRAM_MULTI_COMP
-+#define ZRAM_IR_VERSION "1.2"
++#define ZRAM_IR_VERSION "1.3"
 +#define ZRAM_IR_PROGNAME "ZRAM Immediate Recompression (ZRAM-IR)"
 +#define ZRAM_IR_AUTHOR   "Masahito Suzuki"
 +	printk(KERN_INFO "%s %s by %s\n",
@@ -197,7 +198,7 @@ index 76b326ddd7..4642c43f48 100644
  	return 0;
  
  out_error:
-@@ -2624,6 +2681,10 @@ static int __init zram_init(void)
+@@ -2624,6 +2682,10 @@ static int __init zram_init(void)
  
  static void __exit zram_exit(void)
  {
