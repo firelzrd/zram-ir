@@ -1,24 +1,24 @@
-From 849c3b7f5fe04cb0975d92fd0a81e8b2307d6c17 Mon Sep 17 00:00:00 2001
+From 238bdc3e3de2c63789324ca716ae0b864eb44335 Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
-Date: Sat, 25 Jul 2026 14:55:09 +0900
-Subject: [PATCH] linux6.12.74-lz4kdr-1.3
+Date: Thu, 5 Nov 2026 13:39:31 +0900
+Subject: [PATCH] 6.12.74-lz4kdr-v1.4
 
 ---
  drivers/block/zram/Kconfig          |  18 +
  drivers/block/zram/Makefile         |   1 +
- drivers/block/zram/backend_lz4kdr.c | 132 ++++++
+ drivers/block/zram/backend_lz4kdr.c | 127 ++++++
  drivers/block/zram/backend_lz4kdr.h |  10 +
  drivers/block/zram/zcomp.c          |   4 +
- include/linux/lz4kdr.h              |  78 ++++
+ include/linux/lz4kdr.h              |  75 ++++
  lib/Kconfig                         |   6 +
  lib/Makefile                        |   2 +
  lib/lz4kdr/Makefile                 |   3 +
- lib/lz4kdr/lz4kdr_decode.c          | 249 +++++++++++
- lib/lz4kdr/lz4kdr_encode.c          | 617 ++++++++++++++++++++++++++++
- lib/lz4kdr/lz4kdr_encode_private.h  | 135 ++++++
- lib/lz4kdr/lz4kdr_private.h         | 316 ++++++++++++++
+ lib/lz4kdr/lz4kdr_decode.c          | 274 +++++++++++++
+ lib/lz4kdr/lz4kdr_encode.c          | 603 ++++++++++++++++++++++++++++
+ lib/lz4kdr/lz4kdr_encode_private.h  | 135 +++++++
+ lib/lz4kdr/lz4kdr_private.h         | 316 +++++++++++++++
  lib/lz4kdr/version.h                |  21 +
- 14 files changed, 1592 insertions(+)
+ 14 files changed, 1595 insertions(+)
  create mode 100644 drivers/block/zram/backend_lz4kdr.c
  create mode 100644 drivers/block/zram/backend_lz4kdr.h
  create mode 100644 include/linux/lz4kdr.h
@@ -93,10 +93,10 @@ index 0fdefd5766..c239bb246a 100644
  zram-$(CONFIG_ZRAM_BACKEND_842)		+= backend_842.o
 diff --git a/drivers/block/zram/backend_lz4kdr.c b/drivers/block/zram/backend_lz4kdr.c
 new file mode 100644
-index 0000000000..38246434fd
+index 0000000000..6039e8649f
 --- /dev/null
 +++ b/drivers/block/zram/backend_lz4kdr.c
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,127 @@
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +/*
 + * zram backend for LZ4KDR (see include/linux/lz4kdr.h for what it is
@@ -106,14 +106,11 @@ index 0000000000..38246434fd
 + * setup_params/release_params are no-ops, same as backend_842.c.
 + *
 + * The context's `ht` buffer is the hash table lz4kdr_encode() searches
-+ * with. It's kzalloc()'d once here (not vmalloc()'d -- at
++ * with. It's kmalloc()'d once here (not vmalloc()'d -- at
 + * lz4kdr_encode_state_bytes_min()==2048 bytes it's well within
 + * kmalloc's normal range, and per-CPU vmalloc mappings only cost more
-+ * TLB pressure for no benefit at this size) and, critically, the
-+ * kzalloc zeroing IS the one-time cold-start zero lz4kdr_encode()'s
-+ * API contract requires -- lz4kdr does NOT re-zero this buffer on
-+ * every compress call the way upstream LZ4KD does, see
-+ * lz4kdr_encode.c's probe-loop comment for why that's still correct.
++ * TLB pressure for no benefit at this size). lz4kdr_encode() clears
++ * it on every call, so it needs no zeroing here.
 + */
 +
 +#include <linux/kernel.h>
@@ -155,9 +152,7 @@ index 0000000000..38246434fd
 +		return -ENOMEM;
 +
 +	ctx->context = zctx;
-+	/* kzalloc, not kmalloc: the zeroing here IS the required one-time
-+	 * cold-start zero, see the top-of-file comment. */
-+	zctx->ht = kzalloc(lz4kdr_encode_state_bytes_min(), GFP_KERNEL);
++	zctx->ht = kmalloc(lz4kdr_encode_state_bytes_min(), GFP_KERNEL);
 +	if (!zctx->ht)
 +		goto error;
 +
@@ -269,10 +264,10 @@ index bb514403e3..e5e6ec52a9 100644
  #endif
 diff --git a/include/linux/lz4kdr.h b/include/linux/lz4kdr.h
 new file mode 100644
-index 0000000000..5709c5d580
+index 0000000000..a35cc583d4
 --- /dev/null
 +++ b/include/linux/lz4kdr.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,75 @@
 +/* SPDX-License-Identifier: Dual BSD/GPL */
 +/*
 + * LZ4KDR: a speed-tuned derivative of Huawei's LZ4KD.
@@ -317,12 +312,9 @@ index 0000000000..5709c5d580
 + *        out_limit, or wouldn't fit out_max at all).
 + *   < 0  failure (bad arguments, or in_max > 4096).
 + *
-+ * `state` must be >= lz4kdr_encode_state_bytes_min() bytes and must be
-+ * zeroed once by the caller before its first use (e.g. right after
-+ * allocation) -- lz4kdr does NOT re-zero it on every call, unlike
-+ * upstream LZ4KD. See lz4kdr_encode.c's probe-loop comment for why
-+ * that's still always correct: it never reads a byte it hasn't proven
-+ * is in-bounds and behind the current search position.
++ * `state` must be >= lz4kdr_encode_state_bytes_min() bytes. Its
++ * contents need no initialization: lz4kdr_encode() clears it on every
++ * call.
 + *
 + * `out_limit`, if nonzero and less than min(in_max, out_max), lets the
 + * encoder bail out early once it's clear the result won't beat that
@@ -392,19 +384,19 @@ index 0000000000..089e6fb8a1
 +obj-$(CONFIG_LZ4KDR_DECOMPRESS) += lz4kdr_decode.o
 diff --git a/lib/lz4kdr/lz4kdr_decode.c b/lib/lz4kdr/lz4kdr_decode.c
 new file mode 100644
-index 0000000000..d2ccae1ceb
+index 0000000000..8c40ba476d
 --- /dev/null
 +++ b/lib/lz4kdr/lz4kdr_decode.c
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,274 @@
 +// SPDX-License-Identifier: Dual BSD/GPL
 +/*
 + * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD.
 + * See include/linux/lz4kdr.h for the attribution note.
 + *
-+ * Decoder: byte-for-byte unchanged from upstream LZ4KD's algorithm --
-+ * none of the four validated speedups this fork carries touch decode,
-+ * only the encoder's internal search behavior changed. Renamed
-+ * lz4kd_* -> lz4kdr_* for the exported symbols only.
++ * Decoder: unchanged from upstream LZ4KD's algorithm except for the
++ * end-of-page match copy in out_repeat_slow() -- none of the encoder
++ * speedups this fork carries touch decode, and the compressed format
++ * is unchanged. Renamed lz4kd_* -> lz4kdr_* for the exported symbols.
 + */
 +
 +#if !defined(__KERNEL__)
@@ -514,6 +506,20 @@ index 0000000000..d2ccae1ceb
 +	while_lt_copy_2x_as_x2(out_at, out_from, out_copy_end, R_COPY_MIN);
 +}
 +
++/* copy whole chunks only: nothing is written at or past dst_end */
++inline static void copy_x_within(
++	uint8_t **dst,
++	const uint8_t **src,
++	const uint8_t *const dst_end,
++	const size_t copy_min)
++{
++	while (*dst + copy_min <= dst_end) {
++		m_copy(*dst, *src, copy_min);
++		*dst += copy_min;
++		*src += copy_min;
++	}
++}
++
 +static bool out_repeat_slow(
 +	uint_fast32_t r_bytes_max,
 +	uint_fast32_t offset,
@@ -530,9 +536,20 @@ index 0000000000..d2ccae1ceb
 +		if (offset == 1) {
 +			m_set(out_at, *out_from, r_bytes_max);
 +		} else {
-+			do
++			/*
++			 * Too close to the end of the page for the paths that
++			 * copy past out_copy_end. A long match reaching the
++			 * end of the page gets here for its whole length, so
++			 * copy by chunks as far as the offset allows.
++			 */
++			if (offset >= R_COPY_MIN)
++				copy_x_within(&out_at, &out_from, out_copy_end,
++					      R_COPY_MIN);
++			else if (offset >= (R_COPY_MIN >> 1))
++				copy_x_within(&out_at, &out_from, out_copy_end,
++					      R_COPY_MIN >> 1);
++			while (out_at < out_copy_end)
 +				*out_at++ = *out_from++;
-+			while (out_at < out_copy_end);
 +		}
 +	}
 +	return true;
@@ -647,27 +664,27 @@ index 0000000000..d2ccae1ceb
 +MODULE_DESCRIPTION("LZ4KDR decoder (speed-tuned LZ4KD derivative)");
 diff --git a/lib/lz4kdr/lz4kdr_encode.c b/lib/lz4kdr/lz4kdr_encode.c
 new file mode 100644
-index 0000000000..903a353a05
+index 0000000000..8bfecd032d
 --- /dev/null
 +++ b/lib/lz4kdr/lz4kdr_encode.c
-@@ -0,0 +1,617 @@
+@@ -0,0 +1,603 @@
 +// SPDX-License-Identifier: Dual BSD/GPL
 +/*
 + * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD. See include/linux/
 + * lz4kdr.h for the attribution note and lz4kdr_decode.c's header for
 + * why decode is untouched.
 + *
-+ * This encoder carries five changes vs. upstream LZ4KD, each
++ * This encoder carries four changes vs. upstream LZ4KD, each
 + * independently measured positive across four synthetic benchmark
 + * corpora (zero/high/medium/low compressibility) AND three real-world
-+ * corpora (a compiled executable, an already-compressed video, real
++ * corpora (the head of an ELF file, an already-compressed video, real
 + * prose/markup text) before being combined here -- see the "lz4kdr"
 + * userspace benchmark suite this was validated against and
 + * lz4kd_extreme_optimization_ideas.md for the full writeup. Every
 + * change is called out inline where it occurs:
 + *
-+ *   1. No per-call memset() of the hash table; a branchless q<r guard
-+ *      in the probe loop takes over the safety argument instead.
++ *   1. Removed again: the hash table is cleared for every page, as
++ *      upstream does. See the comment in lz4kdr_encode().
 + *   2. HT_LOG2 12->10: 8KB->2KB hash table (a real CR/speed trade,
 + *      the only one of these changes with a downside -- see the
 + *      comment on HT_LOG2 below).
@@ -700,25 +717,27 @@ index 0000000000..903a353a05
 + * which removes the only call site CRC32 would have sped up) -- were
 + * also implemented, benchmarked, and REMOVED. The AVX2 scan was a
 + * huge win on the synthetic zero/high corpora (+40-54%, +61-90% on
-+ * top of changes 1-5) but a real 7-24% REGRESSION on real compiled-
-+ * executable data in every combination tested: matches in real
-+ * machine code rarely run past a handful of bytes, so the vector
-+ * path's fixed load+compare+movemask cost gets paid on nearly every
-+ * match found and essentially never amortized -- wider vectors made
-+ * this *worse* (AVX-512 regressed executables more than AVX2, which
-+ * regressed them more than SSE2). Two rounds of heuristic gating (an
++ * top of changes 1-5) but a 7-24% REGRESSION on the "exe" corpus in
++ * every combination tested, because matches there are short and the
++ * vector path's fixed load+compare+movemask cost is never amortized;
++ * wider vectors made this *worse* (AVX-512 regressed more than AVX2,
++ * which regressed more than SSE2). Two rounds of heuristic gating (an
 + * 8-byte peek before committing to the vector loop, then a page-level
 + * adaptive on/off streak mirroring change 3's mechanism) only
 + * partially closed the gap, down to a residual ~8-10% regression at
 + * best, and the page-level version underperformed the simpler
-+ * per-match peek. Rather than ship a partial fix for a real
-+ * regression on an extremely common real-world zram content type
-+ * (compiled code -- shared libraries, executables), it was dropped
-+ * entirely. If revisiting this, the interesting open question is
-+ * whether a per-block cheap classifier decided *before* compression
-+ * starts (rather than gating each individual match) could tell long-
-+ * match-heavy pages (worth vectorizing) apart from short-match-heavy
-+ * ones (not) accurately enough to be worth the complexity.
++ * per-match peek, so it was dropped.
++ *
++ * That "exe" corpus later turned out to be the first 4 MiB of
++ * /usr/bin/containerd, which is nearly all .rela.dyn and not machine
++ * code, so these numbers say nothing about real code. The vector scan
++ * has not been re-measured on real code, and would need
++ * kernel_fpu_begin() in the kernel anyway. If revisiting this, the
++ * interesting open question is whether a per-block cheap classifier
++ * decided *before* compression starts (rather than gating each
++ * individual match) could tell long-match-heavy pages (worth
++ * vectorizing) apart from short-match-heavy ones (not) accurately
++ * enough to be worth the complexity.
 + */
 +
 +#if !defined(__KERNEL__)
@@ -900,7 +919,7 @@ index 0000000000..903a353a05
 +			nr_log2, off_log2);
 +}
 +
-+static uint8_t *out_non_repeat(
++static __always_inline uint8_t *out_non_repeat(
 +	uint8_t *out_at,
 +	uint8_t *const out_end,
 +	uint_fast32_t utag,
@@ -937,7 +956,7 @@ index 0000000000..903a353a05
 +		out_at : out_size_bytes(out_at, r_bytes_max - REPEAT_MIN - r_mask);
 +}
 +
-+static uint8_t *out_repeat(
++static __always_inline uint8_t *out_repeat(
 +	uint8_t *out_at,
 +	uint_fast32_t utag,
 +	uint_fast32_t r_bytes_max,
@@ -1000,7 +1019,7 @@ index 0000000000..903a353a05
 +				nr_log2, off_log2);
 +}
 +
-+static const uint8_t *repeat_end(
++static __always_inline const uint8_t *repeat_end(
 +	const uint8_t *q,
 +	const uint8_t *r,
 +	const uint8_t *const in_end_safe,
@@ -1009,9 +1028,9 @@ index 0000000000..903a353a05
 +	q += REPEAT_MIN;
 +	r += REPEAT_MIN;
 +	/* An AVX2 32B-at-a-time vector compare lived here; removed after
-+	 * real-world benchmarking found it regressed compiled-executable
-+	 * data 7-24% (see the top-of-file comment) -- back to upstream
-+	 * LZ4KD's original scalar 8B loop, unmodified. */
++	 * it regressed the "exe" corpus 7-24% (see the top-of-file comment
++	 * for what that corpus really was) -- back to upstream LZ4KD's
++	 * original scalar 8B loop, unmodified. */
 +	do {
 +		const uint64_t x = read8_at(q) ^ read8_at(r);
 +		if (x) {
@@ -1094,31 +1113,12 @@ index 0000000000..903a353a05
 +		uint_fast32_t r_bytes_max = 0;
 +		while (true) {
 +			/*
-+			 * change 1: q<r guard against stale ht[] entries.
-+			 * `state` is no longer memset per-call (see
-+			 * lz4kdr_encode() below); a hash bucket may still
-+			 * hold an offset left over from a PAST call. That
-+			 * offset is always < BLOCK_4KB (a uint16_t written
-+			 * only as r-in0, with in_max capped at 4096), so
-+			 * q=in0+ht[h] can never read out of bounds -- but it
-+			 * could point AHEAD of the current r (q>=r), which
-+			 * would make utag=u_32(r-q) wrap and corrupt the
-+			 * 12-bit offset field written into the compressed
-+			 * stream. The q<r guard rejects exactly that case;
-+			 * anything that also passes equal4()/equal4pv() is a
-+			 * real, correct match against live buffer content --
-+			 * this doesn't depend on the table ever having been
-+			 * cleared, only on this one inequality. (Combined
-+			 * via `&`, not `&&`: the naive short-circuit form
-+			 * compiles to two separately-predicted branches, and
-+			 * q<r's outcome is NOT well-predicted once the table
-+			 * isn't reset every call -- that cost more in
-+			 * mispredictions than the memset saved on non-trivial
-+			 * data. `&` forces a single, well-predicted branch,
-+			 * same branch count as upstream had.) This guard
-+			 * applies to both of change 4's probes below, same as
-+			 * it did to the two separate hashed() calls it
-+			 * replaced.
++			 * ht[] is cleared per page and holds only positions
++			 * already passed, or 0, and r starts at in0 + 1, so
++			 * q < r always holds here and no check is needed.
++			 * lz4kdr_encode() must keep clearing the table: a stale
++			 * entry could give q >= r, and r - q would then wrap
++			 * and corrupt the offset written to the stream.
 +			 */
 +			/*
 +			 * change 4: one 8-byte read feeds BOTH this
@@ -1138,7 +1138,7 @@ index 0000000000..903a353a05
 +				const uint_fast32_t h0 = hash64v_5b(v, HT_LOG2);
 +				q = in0 + ht[h0];
 +				ht[h0] = (uint16_t)(r - in0);
-+				if ((q < r) & equal4pv(q, v))
++				if (equal4pv(q, v))
 +					break;
 +				++r;
 +				{
@@ -1146,7 +1146,7 @@ index 0000000000..903a353a05
 +					const uint_fast32_t h1 = hash64v_5b(v1, HT_LOG2);
 +					q = in0 + ht[h1];
 +					ht[h1] = (uint16_t)(r - in0);
-+					if ((q < r) & equal4pv(q, v1))
++					if (equal4pv(q, v1))
 +						break;
 +				}
 +			}
@@ -1212,10 +1212,13 @@ index 0000000000..903a353a05
 +		out_limit = (unsigned)io_min;
 +	if (unlikely(nr_encoded_bytes_max(in_max, NR_4KB_LOG2) > out_max))
 +		return 0;
-+	/* change 1: memset(state) removed -- safety now rests on the q<r
-+	 * guard in encode_any()'s probe loop, above. The caller must still
-+	 * zero `state` once at allocation time (cold start); see
-+	 * backend_lz4kdr.c's create_ctx, which kzalloc()s it. */
++	/*
++	 * Clear per page: encode_any() relies on this for q < r. Measured
++	 * faster than keeping the table across pages (about 13% fewer
++	 * cycles on real data at 2 KB, for a reason not yet identified)
++	 * and it makes the output depend on the page alone.
++	 */
++	memset(state, 0, encode_state_bytes_min());
 +	*((uint8_t*)out) = 0; /* lz4kdr header */
 +	{
 +		int ret;
@@ -1733,7 +1736,7 @@ index 0000000000..f78e52cf5f
 +#endif /* _LZ4KDR_PRIVATE_H */
 diff --git a/lib/lz4kdr/version.h b/lib/lz4kdr/version.h
 new file mode 100644
-index 0000000000..ea824117b6
+index 0000000000..f57e0f0058
 --- /dev/null
 +++ b/lib/lz4kdr/version.h
 @@ -0,0 +1,21 @@
@@ -1755,7 +1758,7 @@ index 0000000000..ea824117b6
 +#define LZ4KDR_PROGNAME	"LZ4KDR (speed-tuned LZ4KD derivative)"
 +#define LZ4KDR_AUTHOR	"Masahito Suzuki"
 +
-+#define LZ4KDR_VERSION	"1.3"
++#define LZ4KDR_VERSION	"1.4"
 +
 +#endif /* _LIB_LZ4KDR_VERSION_H */
 -- 
