@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LZ4KDR v1.5 Performance</title>
+<style>
+:root{color-scheme:light;
+ --page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#6f6d68;--grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);
+ --v15:#2a78d6;--l111:#eb6834;--kl:#1baf7a;--v13:#898781;--band:rgba(11,11,11,.045);--win:#006300;--lose:#b92f2f}
+@media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){color-scheme:dark;
+ --page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--muted:#a3a198;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);
+ --v15:#3987e5;--l111:#d95926;--kl:#199e70;--v13:#898781;--band:rgba(255,255,255,.06);--win:#3fbf3f;--lose:#f07f7f}}
+:root[data-theme="dark"]{color-scheme:dark;
+ --page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--muted:#a3a198;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);
+ --v15:#3987e5;--l111:#d95926;--kl:#199e70;--v13:#898781;--band:rgba(255,255,255,.06);--win:#3fbf3f;--lose:#f07f7f}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--page);color:var(--ink);font:16px/1.75 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1120px;margin:0 auto;padding:48px 16px 72px}
+h1{font-size:34px;line-height:1.25;margin:0 0 12px;font-weight:700;letter-spacing:.01em}
+h2{font-size:21px;line-height:1.4;margin:0 0 6px;font-weight:700}
+p{margin:0 0 12px}
+code{font:.9em ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.lead{font-size:18px;max-width:46em;color:var(--ink)}
+.meta{color:var(--muted);font-size:14px;margin:0}
+section{margin-top:52px}
+.sub{color:var(--ink2);max-width:52em}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:20px}
+.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:28px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:16px 18px}
+.tile .k{color:var(--ink2);font-size:14px}
+.tile .v{font-size:40px;line-height:1.2;font-weight:700;margin:4px 0}
+.tile .s{color:var(--muted);font-size:14px}
+.ctrl{display:flex;flex-wrap:wrap;gap:12px 24px;align-items:center;justify-content:space-between;margin:18px 0 14px}
+.seg{display:inline-flex;border:1px solid var(--axis);border-radius:8px;overflow:hidden}
+.seg button{font:inherit;font-size:14px;color:var(--ink2);background:transparent;border:0;padding:6px 12px;cursor:pointer}
+.seg button+button{border-left:1px solid var(--axis)}
+.seg button[aria-pressed="true"]{background:var(--v15);color:#fff;font-weight:700}
+.seg button:focus-visible{outline:2px solid var(--ink);outline-offset:-2px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:14px;color:var(--ink2);align-items:center}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.dots{display:grid;grid-template-columns:1.42fr 1fr 1fr;gap:8px}
+.panel h3{font-size:15px;margin:0;font-weight:700}
+.panel .hint{font-size:13px;color:var(--muted);margin:0 0 2px}
+svg{display:block;width:100%;height:auto;overflow:visible}
+svg text{font-family:inherit;fill:var(--muted);font-size:12px}
+svg text.row{fill:var(--ink);font-size:13px}
+svg text.grp{fill:var(--ink2);font-size:12px;font-weight:700}
+svg text.val{fill:var(--ink2);font-size:12px}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.two h3{font-size:16px;margin:0}
+.two .hint{font-size:13px;color:var(--muted);margin:0 0 8px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--grid);white-space:nowrap;font-variant-numeric:tabular-nums}
+th{font-weight:700;color:var(--ink2);font-size:13px}
+th:first-child,td:first-child{text-align:left}
+tr.g td{color:var(--ink2);font-weight:700;background:var(--band)}
+td.me{font-weight:700}
+td.win{color:var(--win);font-weight:700}
+td.lose{color:var(--lose);font-weight:700}
+ul{margin:0;padding-left:1.3em}
+li{margin:4px 0}
+#tip{position:fixed;z-index:9;pointer-events:none;display:none;background:var(--surface);color:var(--ink);border:1px solid var(--axis);border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.6;box-shadow:0 6px 18px rgba(0,0,0,.18);max-width:290px}
+#tip b{display:block;margin-bottom:2px}
+#tip .r{display:grid;grid-template-columns:auto auto;gap:0 14px;font-variant-numeric:tabular-nums}
+#tip .r span:nth-child(even){text-align:right}
+@media (max-width:860px){.dots,.two{grid-template-columns:minmax(0,1fr)}.dots{gap:20px}h1{font-size:28px}main{padding-top:32px}}
+@media (max-width:560px){.tiles{grid-template-columns:minmax(0,1fr)}.tile .v{font-size:34px}.card{padding:14px}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>LZ4KDR v1.5 performance comparison</h1>
+<p class="lead" id="lead"></p>
+<p class="meta">Measured 2026-11-06 · <code>6.12-lz4kdr</code> <code>c5b5b0f854</code> · AMD Ryzen 7 7840HS (Zen 4) · userspace build with kernel-like flags. Not yet measured in a running kernel's zram.</p>
+</header>
+
+<div class="tiles" id="tiles"></div>
+
+<section>
+<div class="ctrl">
+<div>
+<h2>Speed and compression ratio by data set</h2>
+</div>
+<div class="seg" role="group" aria-label="Cache condition">
+<button data-ev="0" aria-pressed="true">Warm cache</button><button data-ev="256" aria-pressed="false">256 KB eviction per page</button>
+</div>
+</div>
+<p class="sub">Further right is faster for speed, and further left is smaller for ratio. The upper plots use zoomed axes that do not start at zero. The extreme data sets below have their own axes, with speed on a log scale. Hover over a row to see its values.</p>
+<div class="legend" id="legend"></div>
+<div class="card" style="margin-top:12px">
+<div class="dots" id="dots"></div>
+</div>
+</section>
+
+<section>
+<h2>LZ4KDR v1.5 by data group</h2>
+<p class="sub">Geometric means per group. For speed, positive means faster. For size, positive means larger, which is worse. <b>✓</b> green means v1.5 wins and <b>✕</b> red means it loses. Differences under 1% are ties and stay uncolored.</p>
+<div class="card scroll"><table id="groups"></table></div>
+</section>
+
+<section>
+<h2>Progress from v1.3 to v1.5</h2>
+<p class="sub" id="bigfix"></p>
+<div class="two">
+<div class="card"><h3>Encode speed change</h3><p class="hint">v1.5 vs v1.3 (%), data sets of 20 MiB or more</p><div id="up-enc"></div></div>
+<div class="card"><h3>Decode speed change</h3><p class="hint">v1.5 vs v1.3 (%), data sets of 20 MiB or more</p><div id="up-dec"></div></div>
+</div>
+</section>
+
+<section>
+<h2>Page compressibility decides the gap</h2>
+<p class="sub" id="bucket-note"></p>
+<div class="two">
+<div class="card"><h3>Encode time per page</h3><p class="hint">ns per page, lower is faster. v1.3 was slow on the left, and v1.5 fixes that</p><div class="legend" id="bk-legend" style="margin-bottom:6px"></div><div id="bk-time"></div></div>
+<div class="card"><h3>Compressed size difference</h3><p class="hint">v1.5 vs Linux 6.12 LZ4 (%), negative is smaller</p><div id="bk-size"></div></div>
+</div>
+</section>
+
+<section>
+<h2>All figures</h2>
+<p class="sub">Follows the cache switch above. Speeds are in MiB/s. Ratio is compressed size divided by original size. Uncompressed pages are those that did not shrink below 4096 bytes.</p>
+<div class="card scroll"><table id="full"></table></div>
+</section>
+
+<section>
+<h2>Method and how to read the results</h2>
+<div class="card">
+<ul>
+<li><b>Codecs:</b> Linux 6.12 LZ4 is the kernel's <code>lib/lz4</code>, called as <code>LZ4_compress_fast</code> and <code>LZ4_decompress_safe</code>. Its compressor is based on LZ4 1.7.3 and its decompressor on LZ4 1.8.3, with later kernel fixes. LZ4 1.11 is upstream v1.11.0.</li>
+<li><b>Build:</b> All codecs use <code>-O2 -mgeneral-regs-only -mno-red-zone -fno-strict-aliasing -fno-stack-protector -fno-tree-vectorize -mtune=generic</code>, plus <code>-falign-*</code> to fix code layout. <code>memcpy</code> is <code>rep movsb</code>, as in the kernel on FSRM CPUs.</li>
+<li><b>Runs:</b> Values are medians of 31 rounds with a warm cache and 21 rounds with eviction, pinned to one core, with pages in shuffled order. Binaries, source and anonymous memory are 20–64 MiB. The five 4 MiB data sets (HTML and prose, <code>.rela.dyn</code>, and the extreme group) have very short passes, so they use 15 rounds of 41 passes (warm) or 11 rounds of 15 passes (eviction). Repeating the same pages may let branch predictors learn them.</li>
+<li><b>Noise:</b> Identical binaries differed by up to <span id="aa0"></span>% with a warm cache and <span id="aa1"></span>% with eviction. Those maxima come from 4 MiB data sets; at 20 MiB or more the spread is about 1%. Treat smaller differences as ties.</li>
+<li><b>Absolute speeds:</b> Other work was running during the measurement (load average 3–6). MiB/s values depend on the environment, so read them as ratios between codecs measured under the same conditions.</li>
+<li><b>Stack bias:</b> Binary name length alone moved decode speed by up to 7% for identical code. Names are therefore equal in length, and each round uses a random stack offset shared by all codecs.</li>
+<li><b><code>.rela.dyn</code>:</b> This is <code>exe.bin</code>, previously labelled an executable corpus. It is the first 4 MiB of containerd and nearly all relocation data, not machine code. Use the binary group to judge code.</li>
+<li><b>Limits:</b> Nothing here was measured in a running kernel's zram. The only CPU is Zen 4, so Intel and aarch64 are untested. Anonymous memory was captured from Python and Node processes and is not real swap content. Video, prose and the synthetic data are 4 MiB each.</li>
+</ul>
+</div>
+</section>
+</main>
+<div id="tip" role="status"></div>
+<script id="report-data" type="application/json">{"modes":{"0":{"go":{"c":{"kl":{"enc_ns":5387.3,"dec_ns":1288.6,"enc":725,"dec":3031,"ratio":0.54548,"raw":91,"pages":8193},"l111":{"enc_ns":5301.3,"dec_ns":1147.5,"enc":737,"dec":3404,"ratio":0.54398,"raw":91,"pages":8193},"v13":{"enc_ns":4979.3,"dec_ns":1150.5,"enc":784,"dec":3395,"ratio":0.55735,"raw":115,"pages":8193},"v15":{"enc_ns":4353.5,"dec_ns":1150.9,"enc":897,"dec":3394,"ratio":0.55719,"raw":115,"pages":8193}},"pct":{"enc_kl":23.5,"enc_l111":21.5,"enc_v13":14.4,"dec_kl":12.4,"dec_l111":0.0,"dec_v13":-0.1},"aa":{"enc":0.5,"dec":-0.3}},"cpp":{"c":{"kl":{"enc_ns":5117.1,"dec_ns":1298.2,"enc":763,"dec":3009,"ratio":0.54633,"raw":128,"pages":7999},"l111":{"enc_ns":5077.4,"dec_ns":1165.7,"enc":769,"dec":3351,"ratio":0.54492,"raw":128,"pages":7999},"v13":{"enc_ns":4640.3,"dec_ns":1125.2,"enc":842,"dec":3472,"ratio":0.56175,"raw":150,"pages":7999},"v15":{"enc_ns":4061.8,"dec_ns":1127.9,"enc":962,"dec":3463,"ratio":0.56129,"raw":150,"pages":7999}},"pct":{"enc_kl":26.0,"enc_l111":24.7,"enc_v13":14.4,"dec_kl":15.5,"dec_l111":3.2,"dec_v13":0.3},"aa":{"enc":0.2,"dec":-0.5}},"c":{"c":{"kl":{"enc_ns":5692.9,"dec_ns":1306.0,"enc":686,"dec":2991,"ratio":0.62502,"raw":152,"pages":8183},"l111":{"enc_ns":5645.0,"dec_ns":1164.6,"enc":692,"dec":3354,"ratio":0.62457,"raw":152,"pages":8183},"v13":{"enc_ns":4882.7,"dec_ns":1122.1,"enc":800,"dec":3481,"ratio":0.66606,"raw":167,"pages":8183},"v15":{"enc_ns":4296.2,"dec_ns":1124.8,"enc":909,"dec":3473,"ratio":0.66554,"raw":167,"pages":8183}},"pct":{"enc_kl":32.7,"enc_l111":31.6,"enc_v13":13.7,"dec_kl":16.7,"dec_l111":3.9,"dec_v13":0.3},"aa":{"enc":-0.0,"dec":-0.4}},"kern":{"c":{"kl":{"enc_ns":5144.3,"dec_ns":1325.0,"enc":759,"dec":2948,"ratio":0.62397,"raw":344,"pages":5333},"l111":{"enc_ns":5127.2,"dec_ns":1198.4,"enc":762,"dec":3260,"ratio":0.6223,"raw":344,"pages":5333},"v13":{"enc_ns":4616.0,"dec_ns":1199.4,"enc":846,"dec":3257,"ratio":0.64544,"raw":549,"pages":5333},"v15":{"enc_ns":4039.1,"dec_ns":1198.5,"enc":967,"dec":3259,"ratio":0.6453,"raw":550,"pages":5333}},"pct":{"enc_kl":26.9,"enc_l111":26.8,"enc_v13":14.4,"dec_kl":10.4,"dec_l111":-0.3,"dec_v13":0.5},"aa":{"enc":0.7,"dec":0.3}},"rust":{"c":{"kl":{"enc_ns":5642.5,"dec_ns":1304.3,"enc":692,"dec":2995,"ratio":0.65208,"raw":76,"pages":8078},"l111":{"enc_ns":5589.4,"dec_ns":1119.1,"enc":699,"dec":3491,"ratio":0.65103,"raw":76,"pages":8078},"v13":{"enc_ns":4688.2,"dec_ns":1038.3,"enc":833,"dec":3762,"ratio":0.69086,"raw":139,"pages":8078},"v15":{"enc_ns":4109.2,"dec_ns":1037.1,"enc":951,"dec":3767,"ratio":0.69074,"raw":140,"pages":8078}},"pct":{"enc_kl":37.3,"enc_l111":36.2,"enc_v13":14.5,"dec_kl":25.8,"dec_l111":8.0,"dec_v13":0.2},"aa":{"enc":0.6,"dec":-0.7}},"anon_py":{"c":{"kl":{"enc_ns":3251.9,"dec_ns":1112.1,"enc":1201,"dec":3512,"ratio":0.25302,"raw":0,"pages":16384},"l111":{"enc_ns":3165.8,"dec_ns":1006.6,"enc":1234,"dec":3881,"ratio":0.25325,"raw":0,"pages":16384},"v13":{"enc_ns":3683.8,"dec_ns":1059.9,"enc":1060,"dec":3685,"ratio":0.24531,"raw":0,"pages":16384},"v15":{"enc_ns":3101.5,"dec_ns":1038.1,"enc":1259,"dec":3763,"ratio":0.24484,"raw":0,"pages":16384}},"pct":{"enc_kl":5.2,"enc_l111":2.4,"enc_v13":18.7,"dec_kl":7.3,"dec_l111":-3.4,"dec_v13":1.9},"aa":{"enc":0.0,"dec":0.5}},"anon_js":{"c":{"kl":{"enc_ns":3822.0,"dec_ns":1279.6,"enc":1022,"dec":3053,"ratio":0.34028,"raw":0,"pages":16384},"l111":{"enc_ns":3720.0,"dec_ns":1196.9,"enc":1050,"dec":3264,"ratio":0.3377,"raw":0,"pages":16384},"v13":{"enc_ns":3974.4,"dec_ns":1048.6,"enc":983,"dec":3725,"ratio":0.32525,"raw":0,"pages":16384},"v15":{"enc_ns":3412.1,"dec_ns":1024.1,"enc":1145,"dec":3814,"ratio":0.32506,"raw":0,"pages":16384}},"pct":{"enc_kl":12.1,"enc_l111":9.1,"enc_v13":16.4,"dec_kl":24.9,"dec_l111":16.7,"dec_v13":2.5},"aa":{"enc":-0.3,"dec":0.9}},"src":{"c":{"kl":{"enc_ns":4935.4,"dec_ns":1282.7,"enc":791,"dec":3045,"ratio":0.4039,"raw":0,"pages":8192},"l111":{"enc_ns":4896.5,"dec_ns":1075.0,"enc":798,"dec":3634,"ratio":0.39986,"raw":0,"pages":8192},"v13":{"enc_ns":4716.5,"dec_ns":968.6,"enc":828,"dec":4033,"ratio":0.40196,"raw":0,"pages":8192},"v15":{"enc_ns":4107.8,"dec_ns":952.6,"enc":951,"dec":4101,"ratio":0.40178,"raw":0,"pages":8192}},"pct":{"enc_kl":20.1,"enc_l111":19.2,"enc_v13":14.7,"dec_kl":34.4,"dec_l111":12.3,"dec_v13":1.7},"aa":{"enc":0.7,"dec":0.9}},"text":{"c":{"kl":{"enc_ns":5464.3,"dec_ns":1389.8,"enc":715,"dec":2811,"ratio":0.46059,"raw":0,"pages":1024},"l111":{"enc_ns":5339.6,"dec_ns":1126.5,"enc":732,"dec":3468,"ratio":0.45527,"raw":0,"pages":1024},"v13":{"enc_ns":5337.4,"dec_ns":1022.4,"enc":732,"dec":3821,"ratio":0.47043,"raw":0,"pages":1024},"v15":{"enc_ns":4689.3,"dec_ns":1004.9,"enc":833,"dec":3887,"ratio":0.4702,"raw":0,"pages":1024}},"pct":{"enc_kl":16.6,"enc_l111":13.8,"enc_v13":14.4,"dec_kl":37.5,"dec_l111":11.7,"dec_v13":1.7},"aa":{"enc":-0.8,"dec":1.7}},"exe4m":{"c":{"kl":{"enc_ns":3659.4,"dec_ns":1060.8,"enc":1067,"dec":3682,"ratio":0.34653,"raw":0,"pages":1024},"l111":{"enc_ns":3578.7,"dec_ns":1076.6,"enc":1092,"dec":3628,"ratio":0.34662,"raw":0,"pages":1024},"v13":{"enc_ns":4406.9,"dec_ns":1300.3,"enc":886,"dec":3004,"ratio":0.34769,"raw":0,"pages":1024},"v15":{"enc_ns":3793.7,"dec_ns":1250.9,"enc":1030,"dec":3123,"ratio":0.34752,"raw":0,"pages":1024}},"pct":{"enc_kl":-3.9,"enc_l111":-5.8,"enc_v13":16.1,"dec_kl":-14.3,"dec_l111":-15.2,"dec_v13":5.1},"aa":{"enc":-0.1,"dec":-1.3}},"high":{"c":{"kl":{"enc_ns":577.9,"dec_ns":244.1,"enc":6759,"dec":16003,"ratio":0.02049,"raw":0,"pages":1024},"l111":{"enc_ns":559.2,"dec_ns":108.4,"enc":6985,"dec":36036,"ratio":0.02049,"raw":0,"pages":1024},"v13":{"enc_ns":531.1,"dec_ns":2740.8,"enc":7355,"dec":1425,"ratio":0.01946,"raw":0,"pages":1024},"v15":{"enc_ns":268.0,"dec_ns":107.3,"enc":14576,"dec":36405,"ratio":0.01922,"raw":0,"pages":1024}},"pct":{"enc_kl":121.0,"enc_l111":110.2,"enc_v13":98.7,"dec_kl":127.5,"dec_l111":0.2,"dec_v13":2459.0},"aa":{"enc":-2.7,"dec":0.6}},"video":{"c":{"kl":{"enc_ns":1043.9,"dec_ns":716.3,"enc":3742,"dec":5453,"ratio":0.99805,"raw":1020,"pages":1024},"l111":{"enc_ns":1056.6,"dec_ns":661.2,"enc":3697,"dec":5908,"ratio":0.998,"raw":1020,"pages":1024},"v13":{"enc_ns":539.8,"dec_ns":551.0,"enc":7236,"dec":7089,"ratio":0.998,"raw":1020,"pages":1024},"v15":{"enc_ns":527.8,"dec_ns":483.4,"enc":7401,"dec":8081,"ratio":0.998,"raw":1020,"pages":1024}},"pct":{"enc_kl":98.8,"enc_l111":98.1,"enc_v13":2.3,"dec_kl":48.3,"dec_l111":35.6,"dec_v13":14.8},"aa":{"enc":0.3,"dec":-0.5}},"low":{"c":{"kl":{"enc_ns":1050.3,"dec_ns":null,"enc":3719,"dec":null,"ratio":1.0,"raw":1024,"pages":1024},"l111":{"enc_ns":1091.0,"dec_ns":null,"enc":3580,"dec":null,"ratio":1.0,"raw":1024,"pages":1024},"v13":{"enc_ns":532.9,"dec_ns":null,"enc":7330,"dec":null,"ratio":1.0,"raw":1024,"pages":1024},"v15":{"enc_ns":526.4,"dec_ns":null,"enc":7421,"dec":null,"ratio":1.0,"raw":1024,"pages":1024}},"pct":{"enc_kl":99.1,"enc_l111":108.5,"enc_v13":1.5,"dec_kl":null,"dec_l111":null,"dec_v13":null},"aa":{"enc":-1.0,"dec":null}}},"256":{"go":{"c":{"kl":{"enc_ns":5434.8,"dec_ns":1310.6,"enc":719,"dec":2981,"ratio":0.54548,"raw":91,"pages":8193},"l111":{"enc_ns":5357.8,"dec_ns":1128.2,"enc":729,"dec":3462,"ratio":0.54398,"raw":91,"pages":8193},"v13":{"enc_ns":4975.3,"dec_ns":1163.0,"enc":785,"dec":3359,"ratio":0.55735,"raw":115,"pages":8193},"v15":{"enc_ns":4365.5,"dec_ns":1166.9,"enc":895,"dec":3348,"ratio":0.55719,"raw":115,"pages":8193}},"pct":{"enc_kl":24.7,"enc_l111":22.8,"enc_v13":14.2,"dec_kl":12.3,"dec_l111":-2.2,"dec_v13":-0.5},"aa":{"enc":-0.1,"dec":-1.1}},"cpp":{"c":{"kl":{"enc_ns":5155.8,"dec_ns":1296.4,"enc":758,"dec":3013,"ratio":0.54633,"raw":128,"pages":7999},"l111":{"enc_ns":5122.9,"dec_ns":1144.3,"enc":763,"dec":3414,"ratio":0.54492,"raw":128,"pages":7999},"v13":{"enc_ns":4665.8,"dec_ns":1135.8,"enc":837,"dec":3439,"ratio":0.56175,"raw":150,"pages":7999},"v15":{"enc_ns":4081.0,"dec_ns":1125.8,"enc":957,"dec":3470,"ratio":0.56129,"raw":150,"pages":7999}},"pct":{"enc_kl":26.4,"enc_l111":25.4,"enc_v13":13.9,"dec_kl":14.7,"dec_l111":1.6,"dec_v13":0.7},"aa":{"enc":-0.7,"dec":-0.4}},"c":{"c":{"kl":{"enc_ns":5724.3,"dec_ns":1305.2,"enc":682,"dec":2993,"ratio":0.62502,"raw":152,"pages":8183},"l111":{"enc_ns":5696.1,"dec_ns":1148.7,"enc":686,"dec":3401,"ratio":0.62457,"raw":152,"pages":8183},"v13":{"enc_ns":4895.6,"dec_ns":1123.6,"enc":798,"dec":3477,"ratio":0.66606,"raw":167,"pages":8183},"v15":{"enc_ns":4297.4,"dec_ns":1129.7,"enc":909,"dec":3458,"ratio":0.66554,"raw":167,"pages":8183}},"pct":{"enc_kl":33.1,"enc_l111":32.3,"enc_v13":13.7,"dec_kl":15.8,"dec_l111":1.8,"dec_v13":0.1},"aa":{"enc":-0.1,"dec":0.6}},"kern":{"c":{"kl":{"enc_ns":5197.1,"dec_ns":1335.6,"enc":752,"dec":2925,"ratio":0.62397,"raw":344,"pages":5333},"l111":{"enc_ns":5193.1,"dec_ns":1195.6,"enc":752,"dec":3267,"ratio":0.6223,"raw":344,"pages":5333},"v13":{"enc_ns":4614.9,"dec_ns":1216.1,"enc":846,"dec":3212,"ratio":0.64544,"raw":549,"pages":5333},"v15":{"enc_ns":4056.2,"dec_ns":1207.4,"enc":963,"dec":3235,"ratio":0.6453,"raw":550,"pages":5333}},"pct":{"enc_kl":27.6,"enc_l111":27.8,"enc_v13":13.5,"dec_kl":10.6,"dec_l111":-0.3,"dec_v13":1.0},"aa":{"enc":0.2,"dec":-0.3}},"rust":{"c":{"kl":{"enc_ns":5674.2,"dec_ns":1329.5,"enc":688,"dec":2938,"ratio":0.65208,"raw":76,"pages":8078},"l111":{"enc_ns":5639.2,"dec_ns":1108.3,"enc":693,"dec":3525,"ratio":0.65103,"raw":76,"pages":8078},"v13":{"enc_ns":4696.7,"dec_ns":1059.5,"enc":832,"dec":3687,"ratio":0.69086,"raw":139,"pages":8078},"v15":{"enc_ns":4118.4,"dec_ns":1052.9,"enc":948,"dec":3710,"ratio":0.69074,"raw":140,"pages":8078}},"pct":{"enc_kl":37.6,"enc_l111":36.9,"enc_v13":14.1,"dec_kl":25.9,"dec_l111":5.7,"dec_v13":0.7},"aa":{"enc":-0.3,"dec":-0.5}},"anon_py":{"c":{"kl":{"enc_ns":3298.1,"dec_ns":1124.3,"enc":1184,"dec":3474,"ratio":0.25302,"raw":0,"pages":16384},"l111":{"enc_ns":3220.6,"dec_ns":1009.9,"enc":1213,"dec":3868,"ratio":0.25325,"raw":0,"pages":16384},"v13":{"enc_ns":3690.6,"dec_ns":1072.5,"enc":1058,"dec":3642,"ratio":0.24531,"raw":0,"pages":16384},"v15":{"enc_ns":3129.3,"dec_ns":1055.3,"enc":1248,"dec":3702,"ratio":0.24484,"raw":0,"pages":16384}},"pct":{"enc_kl":5.3,"enc_l111":2.7,"enc_v13":17.8,"dec_kl":6.7,"dec_l111":-4.2,"dec_v13":1.5},"aa":{"enc":-0.5,"dec":-0.3}},"anon_js":{"c":{"kl":{"enc_ns":3849.6,"dec_ns":1292.3,"enc":1015,"dec":3023,"ratio":0.34028,"raw":0,"pages":16384},"l111":{"enc_ns":3781.4,"dec_ns":1216.5,"enc":1033,"dec":3211,"ratio":0.3377,"raw":0,"pages":16384},"v13":{"enc_ns":3965.6,"dec_ns":1066.9,"enc":985,"dec":3661,"ratio":0.32525,"raw":0,"pages":16384},"v15":{"enc_ns":3395.4,"dec_ns":1040.6,"enc":1150,"dec":3754,"ratio":0.32506,"raw":0,"pages":16384}},"pct":{"enc_kl":13.5,"enc_l111":11.4,"enc_v13":16.7,"dec_kl":24.2,"dec_l111":17.0,"dec_v13":2.5},"aa":{"enc":0.1,"dec":0.5}},"src":{"c":{"kl":{"enc_ns":4995.1,"dec_ns":1283.8,"enc":782,"dec":3043,"ratio":0.4039,"raw":0,"pages":8192},"l111":{"enc_ns":4957.1,"dec_ns":1084.0,"enc":788,"dec":3604,"ratio":0.39986,"raw":0,"pages":8192},"v13":{"enc_ns":4726.6,"dec_ns":992.0,"enc":826,"dec":3938,"ratio":0.40196,"raw":0,"pages":8192},"v15":{"enc_ns":4120.7,"dec_ns":962.1,"enc":948,"dec":4060,"ratio":0.40178,"raw":0,"pages":8192}},"pct":{"enc_kl":20.9,"enc_l111":20.6,"enc_v13":14.4,"dec_kl":33.1,"dec_l111":12.0,"dec_v13":3.2},"aa":{"enc":-0.3,"dec":-0.3}},"text":{"c":{"kl":{"enc_ns":5514.6,"dec_ns":1425.1,"enc":708,"dec":2741,"ratio":0.46059,"raw":0,"pages":1024},"l111":{"enc_ns":5270.0,"dec_ns":1113.5,"enc":741,"dec":3508,"ratio":0.45527,"raw":0,"pages":1024},"v13":{"enc_ns":5131.5,"dec_ns":1032.1,"enc":761,"dec":3785,"ratio":0.47043,"raw":0,"pages":1024},"v15":{"enc_ns":4571.9,"dec_ns":1071.1,"enc":854,"dec":3647,"ratio":0.4702,"raw":0,"pages":1024}},"pct":{"enc_kl":21.1,"enc_l111":17.7,"enc_v13":16.1,"dec_kl":26.2,"dec_l111":5.1,"dec_v13":-2.7},"aa":{"enc":0.3,"dec":0.1}},"exe4m":{"c":{"kl":{"enc_ns":3699.3,"dec_ns":1088.9,"enc":1056,"dec":3587,"ratio":0.34653,"raw":0,"pages":1024},"l111":{"enc_ns":3548.2,"dec_ns":1085.0,"enc":1101,"dec":3600,"ratio":0.34662,"raw":0,"pages":1024},"v13":{"enc_ns":4129.3,"dec_ns":1288.7,"enc":946,"dec":3031,"ratio":0.34769,"raw":0,"pages":1024},"v15":{"enc_ns":3585.5,"dec_ns":1324.5,"enc":1089,"dec":2949,"ratio":0.34752,"raw":0,"pages":1024}},"pct":{"enc_kl":3.8,"enc_l111":1.0,"enc_v13":18.5,"dec_kl":-14.3,"dec_l111":-12.2,"dec_v13":1.1},"aa":{"enc":0.3,"dec":-3.6}},"high":{"c":{"kl":{"enc_ns":835.7,"dec_ns":341.8,"enc":4674,"dec":11428,"ratio":0.02049,"raw":0,"pages":1024},"l111":{"enc_ns":812.5,"dec_ns":195.7,"enc":4808,"dec":19960,"ratio":0.02049,"raw":0,"pages":1024},"v13":{"enc_ns":633.6,"dec_ns":2793.7,"enc":6165,"dec":1398,"ratio":0.01946,"raw":0,"pages":1024},"v15":{"enc_ns":688.9,"dec_ns":210.0,"enc":5670,"dec":18601,"ratio":0.01922,"raw":0,"pages":1024}},"pct":{"enc_kl":37.4,"enc_l111":37.6,"enc_v13":1.0,"dec_kl":67.8,"dec_l111":-3.9,"dec_v13":1237.2},"aa":{"enc":0.4,"dec":-5.4}},"video":{"c":{"kl":{"enc_ns":1226.5,"dec_ns":856.6,"enc":3185,"dec":4560,"ratio":0.99805,"raw":1020,"pages":1024},"l111":{"enc_ns":1264.6,"dec_ns":859.1,"enc":3089,"dec":4547,"ratio":0.998,"raw":1020,"pages":1024},"v13":{"enc_ns":926.5,"dec_ns":656.2,"enc":4216,"dec":5953,"ratio":0.998,"raw":1020,"pages":1024},"v15":{"enc_ns":770.7,"dec_ns":653.7,"enc":5068,"dec":5976,"ratio":0.998,"raw":1020,"pages":1024}},"pct":{"enc_kl":79.9,"enc_l111":74.3,"enc_v13":15.1,"dec_kl":31.0,"dec_l111":33.1,"dec_v13":3.6},"aa":{"enc":0.4,"dec":3.4}},"low":{"c":{"kl":{"enc_ns":1261.8,"dec_ns":null,"enc":3096,"dec":null,"ratio":1.0,"raw":1024,"pages":1024},"l111":{"enc_ns":1266.0,"dec_ns":null,"enc":3086,"dec":null,"ratio":1.0,"raw":1024,"pages":1024},"v13":{"enc_ns":854.9,"dec_ns":null,"enc":4569,"dec":null,"ratio":1.0,"raw":1024,"pages":1024},"v15":{"enc_ns":728.8,"dec_ns":null,"enc":5360,"dec":null,"ratio":1.0,"raw":1024,"pages":1024}},"pct":{"enc_kl":75.7,"enc_l111":81.7,"enc_v13":14.3,"dec_kl":null,"dec_l111":null,"dec_v13":null},"aa":{"enc":-1.3,"dec":null}}}},"geo":{"0.bin.enc_kl":29.2,"0.bin.enc_l111":28.1,"0.bin.enc_v13":14.3,"0.bin.dec_kl":16.0,"0.bin.dec_l111":2.9,"0.bin.dec_v13":0.2,"0.bin.ratio_kl":4.1,"0.bin.ratio_l111":4.3,"0.bin.ratio_v13":-0.0,"0.anon.enc_kl":8.6,"0.anon.enc_l111":5.7,"0.anon.enc_v13":17.5,"0.anon.dec_kl":15.8,"0.anon.dec_l111":6.2,"0.anon.dec_v13":2.2,"0.anon.ratio_kl":-3.9,"0.anon.ratio_l111":-3.5,"0.anon.ratio_v13":-0.1,"0.text.enc_kl":18.3,"0.text.enc_l111":16.5,"0.text.enc_v13":14.5,"0.text.dec_kl":35.9,"0.text.dec_l111":12.0,"0.text.dec_v13":1.7,"0.text.ratio_kl":0.8,"0.text.ratio_l111":1.9,"0.text.ratio_v13":-0.0,"0.real.enc_kl":21.9,"0.real.enc_l111":20.2,"0.real.enc_v13":15.1,"0.real.dec_kl":20.1,"0.real.dec_l111":5.6,"0.real.dec_v13":1.0,"0.real.ratio_kl":1.6,"0.real.ratio_l111":2.0,"0.real.ratio_v13":-0.1,"256.bin.enc_kl":29.8,"256.bin.enc_l111":28.9,"256.bin.enc_v13":13.9,"256.bin.dec_kl":15.7,"256.bin.dec_l111":1.3,"256.bin.dec_v13":0.4,"256.bin.ratio_kl":4.1,"256.bin.ratio_l111":4.3,"256.bin.ratio_v13":-0.0,"256.anon.enc_kl":9.3,"256.anon.enc_l111":7.0,"256.anon.enc_v13":17.2,"256.anon.dec_kl":15.1,"256.anon.dec_l111":5.9,"256.anon.dec_v13":2.0,"256.anon.ratio_kl":-3.9,"256.anon.ratio_l111":-3.5,"256.anon.ratio_v13":-0.1,"256.text.enc_kl":21.0,"256.text.enc_l111":19.1,"256.text.enc_v13":15.2,"256.text.dec_kl":29.6,"256.text.dec_l111":8.5,"256.text.dec_v13":0.2,"256.text.ratio_kl":0.8,"256.text.ratio_l111":1.9,"256.text.ratio_v13":-0.0,"256.real.enc_kl":23.0,"256.real.enc_l111":21.5,"256.real.enc_v13":14.9,"256.real.dec_kl":18.5,"256.real.dec_l111":3.9,"256.real.dec_v13":0.7,"256.real.ratio_kl":1.6,"256.real.ratio_l111":2.0,"256.real.ratio_v13":-0.1},"buckets":[{"k":0,"pages":13066,"kl":{"enc":1832,"dec":678,"size":488},"l111":{"enc":1790,"dec":568,"size":488},"v13":{"enc":1933,"dec":646,"size":438},"v15":{"enc":1639,"dec":600,"size":436}},{"k":1,"pages":25065,"kl":{"enc":3638,"dec":1042,"size":1230},"l111":{"enc":3561,"dec":943,"size":1222},"v13":{"enc":3711,"dec":903,"size":1164},"v15":{"enc":3337,"dec":890,"size":1163}},{"k":2,"pages":17822,"kl":{"enc":5547,"dec":1482,"size":2086},"l111":{"enc":5422,"dec":1366,"size":2072},"v13":{"enc":5187,"dec":1223,"size":2108},"v15":{"enc":4683,"dec":1220,"size":2108}},{"k":3,"pages":16350,"kl":{"enc":6339,"dec":1366,"size":2862},"l111":{"enc":6267,"dec":1231,"size":2858},"v13":{"enc":4995,"dec":1117,"size":3010},"v15":{"enc":4549,"dec":1122,"size":3008}},{"k":4,"pages":6676,"kl":{"enc":5858,"dec":1233,"size":3484},"l111":{"enc":5851,"dec":1030,"size":3486},"v13":{"enc":3995,"dec":868,"size":3777},"v15":{"enc":3696,"dec":883,"size":3776}},{"k":5,"pages":791,"kl":{"enc":1309,"dec":0,"size":4096},"l111":{"enc":1348,"dec":0,"size":4096},"v13":{"enc":1150,"dec":1,"size":4096},"v15":{"enc":911,"dec":1,"size":4096}}]}</script>
+<script>
+const D=JSON.parse(document.getElementById('report-data').textContent);
+const C=[['kl','Linux 6.12 LZ4','Linux 6.12'],['l111','LZ4 1.11','LZ4 1.11'],['v15','LZ4KDR v1.5','v1.5']];
+const CN=Object.fromEntries(C);
+CN.v13='LZ4KDR v1.3';
+const LG={...CN,kl:'Linux 6.12 LZ4 (compressor 1.7.3, decompressor 1.8.3)'};
+const G=[['Binaries',[['go','Go'],['cpp','C++'],['c','C'],['kern','vmlinux'],['rust','Rust']]],
+ ['Process memory',[['anon_py','Anon memory (Python)'],['anon_js','Anon memory (Node)']]],
+ ['Text',[['src','C source'],['text','HTML and prose']]],
+ ['Special',[['exe4m','.rela.dyn']]],
+ ['Extreme',[['high','Repetitive (synthetic)'],['video','Compressed video'],['low','Incompressible (synth.)']]]];
+const NAME=Object.fromEntries(G.flatMap(g=>g[1]));
+let ev='0';
+const M=()=>D.modes[ev];
+const pct=(x,d=1)=>x==null?'—':(x>0?'+':x<0?'−':'±')+Math.abs(x).toFixed(d)+'%';
+const num=x=>x==null?'—':Math.round(x).toLocaleString('en-US');
+const $=id=>document.getElementById(id);
+function mark(v,x,y,r){
+ x=+x;y=+y;
+ const f=`var(--${v})`,s='var(--surface)';
+ if(v==='v15')return `<circle cx="${x}" cy="${y}" r="${r}" fill="${f}" stroke="${s}" stroke-width="2"/>`;
+ if(v==='v13')return `<circle cx="${x}" cy="${y}" r="${r+2.5}" fill="none" stroke="${f}" stroke-width="2"/>`;
+ if(v==='kl'){const a=r-.4;return `<rect x="${x-a}" y="${y-a}" width="${2*a}" height="${2*a}" rx="1.5" fill="${f}" stroke="${s}" stroke-width="2"/>`}
+ const a=r+1.3;return `<path d="M${x} ${y-a}L${x+a} ${y}L${x} ${y+a}L${x-a} ${y}Z" fill="${f}" stroke="${s}" stroke-width="2"/>`;
+}
+const legend=s=>s.map(v=>`<span><svg width="18" height="18" viewBox="0 0 18 18" style="width:18px">${mark(v,9,9,4.5)}</svg>${LG[v]}</span>`).join('');
+$('legend').innerHTML=legend(['v15','l111','kl']);
+const tip=$('tip');
+function show(e,html){tip.innerHTML=html;tip.style.display='block';const w=tip.offsetWidth,h=tip.offsetHeight;let x=e.clientX+14,y=e.clientY+14;if(x+w>innerWidth-8)x=e.clientX-w-14;if(x<8)x=8;if(y+h>innerHeight-8)y=e.clientY-h-14;if(y<8)y=8;tip.style.left=x+'px';tip.style.top=y+'px'}
+function hide(){tip.style.display='none'}
+function hook(root,fn){root.querySelectorAll('[data-h]').forEach(n=>{const h=e=>show(e,fn(n.dataset.h));n.addEventListener('pointermove',h);n.addEventListener('pointerdown',h);n.addEventListener('pointerleave',hide)})}
+function rowsTip(title,rows){return `<b>${title}</b><div class="r">${rows.map(([a,b])=>`<span>${a}</span><span>${b}</span>`).join('')}</div>`}
+const PANELS=[
+ {key:'enc',title:'Encode speed',hint:'MiB/s, right is faster',main:{dom:[600,1400],ticks:[600,800,1000,1200,1400]},ext:{log:1,dom:[3000,20000],ticks:[5000,10000,20000]}},
+ {key:'dec',title:'Decode speed',hint:'MiB/s, right is faster',main:{dom:[2800,4400],ticks:[2800,3200,3600,4000,4400]},ext:{log:1,dom:[1000,50000],ticks:[1000,2000,5000,10000,20000,50000]}},
+ {key:'ratio',title:'Compression ratio',hint:'Compressed / original, left is smaller',main:{dom:[.2,.8],ticks:[.2,.4,.6,.8]},ext:{dom:[0,1],ticks:[0,.5,1]}}];
+function dotPanel(el,p,labels){
+ const W=Math.max(260,el.clientWidth),L=labels?158:12,Rm=30,rowH=26,grpH=26;
+ let svg='',y=8;
+ const plot=(groups,sc)=>{
+  const X=v=>sc.log?L+(Math.log(v)-Math.log(sc.dom[0]))/(Math.log(sc.dom[1])-Math.log(sc.dom[0]))*(W-L-Rm):L+(v-sc.dom[0])/(sc.dom[1]-sc.dom[0])*(W-L-Rm);
+  const top=y+12; let body='';
+  for(const [g,items] of groups){
+   y+=grpH; if(labels)body+=`<text class="grp" x="0" y="${y-8}">${g}</text>`;
+   for(const [n,lab] of items){
+    const cy=y+rowH/2,c=M()[n].c;
+    body+=`<rect x="0" y="${y}" width="${W}" height="${rowH}" fill="transparent" data-h="${n}"/>`;
+    body+=`<line x1="${L}" x2="${W-Rm}" y1="${cy}" y2="${cy}" stroke="var(--grid)" pointer-events="none"/>`;
+    if(labels)body+=`<text class="row" x="0" y="${cy+4.5}" pointer-events="none">${lab}</text>`;
+    for(const v of ['kl','l111','v15']){const val=c[v][p.key];
+     if(val!=null)body+=`<g pointer-events="none">${mark(v,X(val).toFixed(1),cy,4.5)}</g>`}
+    if(p.key==='dec'&&c.v15.dec==null)body+=`<text x="${L+6}" y="${cy-4}" pointer-events="none" style="paint-order:stroke;stroke:var(--surface);stroke-width:4px">No decode: all pages stored raw</text>`;
+    y+=rowH;
+   }
+  }
+  const b=y+6,fmt=t=>sc.log?(t/1000+'K'):(t>=1000?t.toLocaleString('en-US'):t);
+  svg+=sc.ticks.map(t=>`<line x1="${X(t)}" x2="${X(t)}" y1="${top}" y2="${b}" stroke="var(--grid)"/><text x="${X(t)}" y="${b+16}" text-anchor="middle">${fmt(t)}</text>`).join('');
+  svg+=`<line x1="${L}" x2="${W-Rm}" y1="${b}" y2="${b}" stroke="var(--axis)"/>`+body;
+  y=b+26;
+ };
+ plot(G.slice(0,4),p.main); plot(G.slice(4),p.ext);
+ el.innerHTML=`<svg viewBox="0 0 ${W} ${y}" role="img" aria-label="${p.title} by data set. All values are in the table below">${svg}</svg>`;
+ hook(el,n=>{const c=M()[n].c;
+  return rowsTip(`${NAME[n]}: ${p.title}`,['v15','l111','kl'].map(v=>[CN[v],p.key==='ratio'?c[v].ratio.toFixed(3):(c[v][p.key]==null?'—':num(c[v][p.key])+' MiB/s')]))});
+}
+function barChart(el,rows,fmtMax,tipFn,rowH=25){
+ const W=Math.max(260,el.clientWidth),L=158,Rm=58,top=4;
+ const vals=rows.map(r=>r[1]),lo=Math.min(0,...vals),hi=Math.max(...vals,1),X=v=>L+(v-lo)/(hi-lo)*(W-L-Rm);
+ let s='',y=top;
+ for(const [n,v,lab] of rows){
+  const x0=X(0),x1=X(v),h=13,yy=y+(rowH-h)/2,w=Math.abs(x1-x0),l=Math.min(x0,x1),r=Math.min(4,w);
+  const path=v>=0?`M${l} ${yy}H${l+w-r}q${r} 0 ${r} ${r}V${yy+h-r}q0 ${r} ${-r} ${r}H${l}Z`:`M${l+w} ${yy}H${l+r}q${-r} 0 ${-r} ${r}V${yy+h-r}q0 ${r} ${r} ${r}H${l+w}Z`;
+  s+=`<rect x="0" y="${y}" width="${W}" height="${rowH}" fill="transparent" data-h="${n}"/>`;
+  s+=`<text class="row" x="0" y="${y+rowH/2+4.5}" pointer-events="none">${lab}</text><path d="${path}" fill="var(--v15)" pointer-events="none"/>`;
+  s+=`<text class="val" x="${v>=0?x1+6:x0+6}" y="${y+rowH/2+4}" pointer-events="none">${pct(v)}</text>`;
+  y+=rowH;
+ }
+ el.innerHTML=`<svg viewBox="0 0 ${W} ${y+6}" role="img" aria-label="v1.5 change"><line x1="${X(0)}" x2="${X(0)}" y1="${top}" y2="${y+2}" stroke="var(--axis)"/>${s}</svg>`;
+ hook(el,tipFn);
+}
+const BKL=['0–20%','20–40%','40–60%','60–80%','80–100%'];
+function lineChart(el){
+ const W=Math.max(260,el.clientWidth),H=300,L=52,Rm=16,T=10,B=44,bk=D.buckets.filter(b=>b.k<5);
+ const hi=7000,X=i=>L+(i+.5)/bk.length*(W-L-Rm),Y=v=>T+(1-v/hi)*(H-T-B);
+ let s=[0,2000,4000,6000].map(t=>`<line x1="${L}" x2="${W-Rm}" y1="${Y(t)}" y2="${Y(t)}" stroke="${t?'var(--grid)':'var(--axis)'}"/><text x="${L-8}" y="${Y(t)+4}" text-anchor="end">${t?t.toLocaleString('en-US'):0}</text>`).join('');
+ bk.forEach((b,i)=>{s+=`<text x="${X(i)}" y="${H-B+18}" text-anchor="middle">${BKL[i]}</text>`});
+ s+=`<text x="${(L+W-Rm)/2}" y="${H-6}" text-anchor="middle">Page ratio under Linux 6.12 LZ4 (left = easier to compress)</text>`;
+ for(const v of ['kl','l111','v13','v15']){
+  s+=`<polyline points="${bk.map((b,i)=>X(i)+','+Y(b[v].enc)).join(' ')}" fill="none" stroke="var(--${v})" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  bk.forEach((b,i)=>{s+=mark(v,X(i),Y(b[v].enc),4)});
+ }
+ const e=bk.length-1;
+ bk.forEach((b,i)=>{const w=(W-L-Rm)/bk.length;s+=`<rect x="${X(i)-w/2}" y="${T}" width="${w}" height="${H-T-B}" fill="transparent" data-h="${i}"/>`});
+ el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Encode time by page compressibility">${s}</svg>`;
+ hook(el,i=>{const b=bk[+i];return rowsTip(`Page ratio ${BKL[+i]} (${num(b.pages)} pages)`,['v15','v13','l111','kl'].map(v=>[CN[v],num(b[v].enc)+' ns']))});
+}
+function renderDots(){
+ const d=$('dots'),wide=innerWidth>860;
+ d.innerHTML=PANELS.map((p,i)=>`<div class="panel"><h3 style="padding-left:${(wide&&i)?12:(wide?158:0)}px">${p.title}</h3><p class="hint" style="padding-left:${(wide&&i)?12:(wide?158:0)}px">${p.hint}</p><div id="p${i}"></div></div>`).join('');
+ PANELS.forEach((p,i)=>dotPanel($('p'+i),p,i===0||!wide));
+}
+function renderUp(){
+ const big=new Set(['go','cpp','c','kern','rust','anon_py','anon_js','src']),list=G.flatMap(g=>g[1]).filter(([n])=>big.has(n));
+ barChart($('up-enc'),list.map(([n,l])=>[n,M()[n].pct.enc_v13,l]),0,n=>rowsTip(NAME[n],[['v1.3',num(M()[n].c.v13.enc)+' MiB/s'],['v1.5',num(M()[n].c.v15.enc)+' MiB/s']]));
+ barChart($('up-dec'),list.map(([n,l])=>[n,M()[n].pct.dec_v13,l]),0,n=>rowsTip(NAME[n],[['v1.3',num(M()[n].c.v13.dec)+' MiB/s'],['v1.5',num(M()[n].c.v15.dec)+' MiB/s']]));
+}
+function renderBk(){
+ $('bk-legend').innerHTML=legend(['v15','v13','l111','kl']);
+ lineChart($('bk-time'));
+ const bk=D.buckets.filter(b=>b.k<5);
+ barChart($('bk-size'),bk.map((b,i)=>[String(i),(b.v15.size/b.kl.size-1)*100,'Page ratio '+BKL[i]]),0,i=>{const b=bk[+i];return rowsTip(`Page ratio ${BKL[+i]}`,[[CN.kl,num(b.kl.size)+' B'],[CN.v15,num(b.v15.size)+' B'],['Pages',num(b.pages)]])},58);
+}
+function verdict(x,lowerWins){
+ if(Math.abs(x)<1)return `<td>${pct(x)}</td>`;
+ const win=lowerWins?x<0:x>0;
+ return `<td class="${win?'win':'lose'}">${win?'✓':'✕'} ${pct(x)}</td>`;
+}
+function renderText(){
+ const g=(k)=>D.geo[ev+'.'+k],m=M();
+ const s=x=>pct(x).replace('+','');
+ $('lead').textContent=`Across nine real data sets, LZ4KDR v1.5 encodes ${s(g('real.enc_kl'))} faster and decodes ${s(g('real.dec_kl'))} faster than the LZ4 in Linux 6.12, whose compressor is based on LZ4 1.7.3 and decompressor on LZ4 1.8.3. Compressed output is ${s(g('real.ratio_kl'))} larger on average.`;
+ const t=[['Encode speed',g('real.enc_kl'),g('real.enc_l111')],['Decode speed',g('real.dec_kl'),g('real.dec_l111')],['Compressed size',g('real.ratio_kl'),g('real.ratio_l111')]];
+ $('tiles').innerHTML=t.map(([k,a,b],i)=>`<div class="tile"><div class="k">${k} vs Linux 6.12 LZ4</div><div class="v">${pct(a)}</div><div class="s">vs LZ4 1.11 ${pct(b)}${i==2?' (positive is larger)':''}</div></div>`).join('');
+ const gs=[['Binaries','bin'],['Process memory','anon'],['Text','text'],['All real data','real']];
+ $('groups').innerHTML=`<tr><th>Group</th><th>Encode vs Linux LZ4</th><th>Encode vs LZ4 1.11</th><th>Decode vs Linux LZ4</th><th>Decode vs LZ4 1.11</th><th>Size vs Linux LZ4</th><th>Size vs LZ4 1.11</th></tr>`+gs.map(([l,k])=>`<tr><td>${l}</td>${['enc_kl','enc_l111','dec_kl','dec_l111','ratio_kl','ratio_l111'].map(f=>verdict(g(k+'.'+f),f.startsWith('ratio'))).join('')}</tr>`).join('');
+ const h=m.high.c;
+ $('bigfix').textContent=`Compared with v1.3, encoding is about 13–19% faster on most real data, and the compression ratio is unchanged. Decoding highly repetitive data went from ${num(h.v13.dec)} to ${num(h.v15.dec)} MiB/s, level with LZ4 1.11 at ${num(h.l111.dec)} MiB/s. Decoding other data changes little. The 4 MiB data sets are left out of these charts because their v1.3 figures change a lot with the number of passes.`;
+ const bk=D.buckets;
+ $('bucket-note').textContent=`The ${num(bk.reduce((s,b)=>s+b.pages,0))} pages of the nine real data sets are split into five groups by their ratio under Linux 6.12 LZ4. LZ4KDR produces smaller output on compressible pages and larger output on hard ones. Its encode time advantage grows as pages get harder to compress. This section uses warm-cache values and does not follow the cache switch.`;
+ const aa=e=>Math.max(...Object.values(D.modes[e]).flatMap(x=>[x.aa.enc,x.aa.dec]).filter(v=>v!=null).map(Math.abs)).toFixed(1);
+ $('aa0').textContent=aa('0');$('aa1').textContent=aa('256');
+ const hd=`<tr><th rowspan="2">Data set</th><th colspan="3" style="text-align:center">Encode (MiB/s)</th><th colspan="3" style="text-align:center">Decode (MiB/s)</th><th colspan="3" style="text-align:center">Ratio</th><th colspan="2" style="text-align:center">Uncompressed pages</th><th rowspan="2">Total pages</th></tr><tr>${[C,C,C].map(s=>s.map(c=>`<th>${c[2]}</th>`).join('')).join('')}<th>Linux 6.12</th><th>v1.5</th></tr>`;
+ const cell=(v,x)=>`<td class="${v=='v15'?'me':''}">${x}</td>`;
+ $('full').innerHTML=hd+G.map(([gn,it])=>`<tr class="g"><td colspan="13">${gn}</td></tr>`+it.map(([n,l])=>{const c=m[n].c;return `<tr><td>${l}</td>${C.map(([v])=>cell(v,num(c[v].enc))).join('')}${C.map(([v])=>cell(v,num(c[v].dec))).join('')}${C.map(([v])=>cell(v,c[v].ratio.toFixed(3))).join('')}<td>${num(c.kl.raw)}</td><td class="me">${num(c.v15.raw)}</td><td>${num(c.v15.pages)}</td></tr>`}).join('')).join('');
+}
+function all(){renderText();renderDots();renderUp();renderBk()}
+document.querySelectorAll('.seg button').forEach(b=>b.addEventListener('click',()=>{ev=b.dataset.ev;document.querySelectorAll('.seg button').forEach(x=>x.setAttribute('aria-pressed',x===b));all()}));
+let rt;addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(all,120)});
+all();
+</script>
+</body>
+</html>

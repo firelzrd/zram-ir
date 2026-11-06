@@ -52,4 +52,8 @@ ZRAM-IR optimizes the *initial write* process. It complements the Linux kernel's
 4.  **Configure Compressors:** Configure the compressors for your ZRAM device(s). The specific method depends on your kernel version and ZRAM configuration tools, but typically involves setting the `comp_algorithm` sysfs attribute. Ensure compressors are assigned priorities as needed for ZRAM-IR's trial order (lower priority number = higher priority).
 5.  **Adjust Immediate Trial Range:** Control the number of compressors ZRAM-IR immediately tries using the `/proc/sys/vm/zram_recomp_immediate` sysctl parameter.
 
+## LZ4KDR Performance
+
+See the [LZ4KDR performance comparison](https://firelzrd.github.io/zram-ir/lz4kdr-performance.html) for speed and compression ratio against the LZ4 in Linux 6.12 and LZ4 1.11.
+
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Y8Y5NHO2I)

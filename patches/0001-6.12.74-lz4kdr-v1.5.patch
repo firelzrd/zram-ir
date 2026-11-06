@@ -1,7 +1,7 @@
-From 238bdc3e3de2c63789324ca716ae0b864eb44335 Mon Sep 17 00:00:00 2001
+From 485b352721e05aa33c3c8672ed660819b20f530f Mon Sep 17 00:00:00 2001
 From: Masahito S <firelzrd@gmail.com>
-Date: Thu, 5 Nov 2026 13:39:31 +0900
-Subject: [PATCH] 6.12.74-lz4kdr-v1.4
+Date: Fri, 6 Nov 2026 10:47:39 +0900
+Subject: [PATCH] 6.12.74-lz4kdr-v1.5
 
 ---
  drivers/block/zram/Kconfig          |  18 +
@@ -13,12 +13,12 @@ Subject: [PATCH] 6.12.74-lz4kdr-v1.4
  lib/Kconfig                         |   6 +
  lib/Makefile                        |   2 +
  lib/lz4kdr/Makefile                 |   3 +
- lib/lz4kdr/lz4kdr_decode.c          | 274 +++++++++++++
+ lib/lz4kdr/lz4kdr_decode.c          | 300 ++++++++++++++
  lib/lz4kdr/lz4kdr_encode.c          | 603 ++++++++++++++++++++++++++++
  lib/lz4kdr/lz4kdr_encode_private.h  | 135 +++++++
  lib/lz4kdr/lz4kdr_private.h         | 316 +++++++++++++++
  lib/lz4kdr/version.h                |  21 +
- 14 files changed, 1595 insertions(+)
+ 14 files changed, 1621 insertions(+)
  create mode 100644 drivers/block/zram/backend_lz4kdr.c
  create mode 100644 drivers/block/zram/backend_lz4kdr.h
  create mode 100644 include/linux/lz4kdr.h
@@ -384,10 +384,10 @@ index 0000000000..089e6fb8a1
 +obj-$(CONFIG_LZ4KDR_DECOMPRESS) += lz4kdr_decode.o
 diff --git a/lib/lz4kdr/lz4kdr_decode.c b/lib/lz4kdr/lz4kdr_decode.c
 new file mode 100644
-index 0000000000..8c40ba476d
+index 0000000000..6a8e2bb509
 --- /dev/null
 +++ b/lib/lz4kdr/lz4kdr_decode.c
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,300 @@
 +// SPDX-License-Identifier: Dual BSD/GPL
 +/*
 + * LZ4KDR -- speed-tuned derivative of Huawei LZ4KD.
@@ -444,7 +444,8 @@ index 0000000000..8c40ba476d
 +	NR_COPY_MIN = 16,
 +	R_COPY_MIN = 16,
 +	R_COPY_SAFE = R_COPY_MIN - 1,
-+	R_COPY_SAFE_2X = (R_COPY_MIN << 1) - 1
++	R_COPY_SAFE_2X = (R_COPY_MIN << 1) - 1,
++	R_COPY_DOUBLING_MIN = 64
 +};
 +
 +static bool out_non_repeat(
@@ -520,6 +521,26 @@ index 0000000000..8c40ba476d
 +	}
 +}
 +
++/*
++ * The bytes between src and dst repeat with a period of (dst - src), so
++ * each copy may take all of them and the distance doubles every round.
++ * The two ranges never overlap, and nothing is written past dst + total.
++ */
++static void copy_doubling(
++	uint8_t *dst,
++	const uint8_t *src,
++	size_t total)
++{
++	while (total > (size_t)(dst - src)) {
++		const size_t available = dst - src;
++
++		m_copy(dst, src, available);
++		dst += available;
++		total -= available;
++	}
++	m_copy(dst, src, total);
++}
++
 +static bool out_repeat_slow(
 +	uint_fast32_t r_bytes_max,
 +	uint_fast32_t offset,
@@ -540,8 +561,13 @@ index 0000000000..8c40ba476d
 +			 * Too close to the end of the page for the paths that
 +			 * copy past out_copy_end. A long match reaching the
 +			 * end of the page gets here for its whole length, so
-+			 * copy by chunks as far as the offset allows.
++			 * copy it in growing blocks, and a short one by chunks
++			 * as far as the offset allows.
 +			 */
++			if (r_bytes_max >= R_COPY_DOUBLING_MIN) {
++				copy_doubling(out_at, out_from, r_bytes_max);
++				return true;
++			}
 +			if (offset >= R_COPY_MIN)
 +				copy_x_within(&out_at, &out_from, out_copy_end,
 +					      R_COPY_MIN);
@@ -1736,7 +1762,7 @@ index 0000000000..f78e52cf5f
 +#endif /* _LZ4KDR_PRIVATE_H */
 diff --git a/lib/lz4kdr/version.h b/lib/lz4kdr/version.h
 new file mode 100644
-index 0000000000..f57e0f0058
+index 0000000000..79a9af76f2
 --- /dev/null
 +++ b/lib/lz4kdr/version.h
 @@ -0,0 +1,21 @@
@@ -1758,7 +1784,7 @@ index 0000000000..f57e0f0058
 +#define LZ4KDR_PROGNAME	"LZ4KDR (speed-tuned LZ4KD derivative)"
 +#define LZ4KDR_AUTHOR	"Masahito Suzuki"
 +
-+#define LZ4KDR_VERSION	"1.4"
++#define LZ4KDR_VERSION	"1.5"
 +
 +#endif /* _LIB_LZ4KDR_VERSION_H */
 -- 
